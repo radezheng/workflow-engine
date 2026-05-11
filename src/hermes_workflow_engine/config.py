@@ -20,9 +20,12 @@ class HWEConfig:
 
 
 def default_config_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    config_home = Path(base).expanduser() if base else Path.home() / ".config"
-    return config_home / "hermes-workflow-engine" / "config.yaml"
+    cwd = Path.cwd().resolve()
+    for directory in (cwd, *cwd.parents):
+        candidate = directory / "hwe.config.yaml"
+        if candidate.exists():
+            return candidate
+    return cwd / "hwe.config.yaml"
 
 
 def configured_config_path() -> Path:

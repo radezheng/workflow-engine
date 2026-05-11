@@ -57,7 +57,7 @@ All commands, Hermes profile invocations, output paths, validators, artifacts, a
 
 ## HWE Local Config
 
-Machine-specific defaults belong in HWE config, not in skills or workflow templates. The default config path is `~/.config/hermes-workflow-engine/config.yaml`; set `HWE_CONFIG` to use another file.
+Machine-specific defaults belong in HWE config, not in skills or workflow templates. By default, HWE looks for `hwe.config.yaml` from the current directory upward. If none exists, `hwe config init` creates `hwe.config.yaml` in the current directory. Set `HWE_CONFIG` to use an explicit file.
 
 Create or inspect the local config with:
 

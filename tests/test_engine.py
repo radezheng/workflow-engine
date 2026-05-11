@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from hermes_workflow_engine.config import HWEConfig
+from hermes_workflow_engine.config import HWEConfig, default_config_path
 from hermes_workflow_engine.runtime import WorkflowRuntime
 from hermes_workflow_engine.spec import load_workflow
 from hermes_workflow_engine.storage import Storage
@@ -99,6 +99,18 @@ def test_config_default_workspace_root_is_used_when_spec_omits_workspace(tmp_pat
 
     assert spec.workspace_root == workspace_root
     assert spec.workspace == workspace_root / "alpha"
+
+
+def test_default_config_path_walks_up_to_project_local_file(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    nested = project_root / "subdir" / "child"
+    nested.mkdir(parents=True)
+    config_path = project_root / "hwe.config.yaml"
+    config_path.write_text("default_workspace_root: /tmp/hermes-projects\n", encoding="utf-8")
+
+    monkeypatch.chdir(nested)
+
+    assert default_config_path() == config_path
 
 
 def test_hermes_profile_command_uses_current_cli_shape(tmp_path: Path) -> None:
