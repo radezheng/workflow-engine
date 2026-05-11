@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from hermes_workflow_engine.cli import main
@@ -255,6 +257,83 @@ def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
     assert storage.get_task(task["id"])["status"] == "succeeded"
 
 
+def test_project_runtime_runs_http_check_task(tmp_path: Path) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/health":
+                body = json.dumps({"status": "healthy", "database": "connected"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        project_root = tmp_path / "http-check-project"
+        storage = ProjectStorage(project_root)
+        project = storage.upsert_project("http-check-project")
+        workitem = storage.create_workitem(project["id"], "Smoke test API")
+        workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+        task = storage.create_task(
+            workflow["id"],
+            "Check health endpoint",
+            kind="http_check",
+            profile="command",
+            prompt_text=json.dumps(
+                {
+                    "requests": [
+                        {
+                            "url": f"http://127.0.0.1:{server.server_port}/health",
+                            "expect_status": 200,
+                            "expect_json": {"status": "healthy"},
+                            "expect_contains": "connected",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        summary = ProjectRuntime(storage).run_workitem(project["id"], workitem["id"])
+
+        assert summary.tasks_started == 1
+        assert summary.tasks_succeeded == 1
+        assert summary.failed == []
+        assert summary.blocked == []
+        assert storage.get_task(task["id"])["status"] == "succeeded"
+    finally:
+        server.shutdown()
+
+
+def test_project_runtime_http_check_failure_blocks_summary(tmp_path: Path) -> None:
+    project_root = tmp_path / "http-check-failure"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("http-check-failure")
+    workitem = storage.create_workitem(project["id"], "Smoke test API")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Check missing endpoint",
+        kind="http_check",
+        profile="command",
+        prompt_text=json.dumps({"url": "http://127.0.0.1:1/missing", "retries": 1, "timeout_seconds": 0.1}),
+    )
+
+    summary = ProjectRuntime(storage).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_failed == 1
+    assert summary.failed == [task["id"]]
+    assert summary.open == []
+
+
 def test_task_release_cli_returns_claimed_task_to_ready(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "release-project"
     assert main(["project", "init", str(project_root), "--id", "release-project"]) == 0
@@ -275,6 +354,53 @@ def test_task_release_cli_returns_claimed_task_to_ready(tmp_path: Path, capsys) 
     assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-2", "--profile", "reviewer"]) == 0
     reclaimed = json.loads(capsys.readouterr().out)
     assert reclaimed["id"] == task["id"]
+
+
+def test_task_retry_cli_returns_failed_task_to_ready(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "retry-project"
+    assert main(["project", "init", str(project_root), "--id", "retry-project"]) == 0
+    capsys.readouterr()
+    assert main(["workitem", "create", str(project_root), "Retry failed", "--project-id", "retry-project"]) == 0
+    workitem = json.loads(capsys.readouterr().out)
+    assert main(["workflow", "create", str(project_root), workitem["id"], "--project-id", "retry-project"]) == 0
+    workflow = json.loads(capsys.readouterr().out)
+    assert main(["task", "create", str(project_root), workflow["id"], "Retry me", "--kind", "qa", "--profile", "reviewer"]) == 0
+    task = json.loads(capsys.readouterr().out)
+    assert main(["task", "complete", str(project_root), task["id"], "--status", "failed"]) == 0
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["status"] == "failed"
+
+    assert main(["task", "retry", str(project_root), task["id"], "--reason", "transient-healthcheck"]) == 0
+    retried = json.loads(capsys.readouterr().out)
+
+    assert retried["status"] == "ready"
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-1", "--profile", "reviewer"]) == 0
+    reclaimed = json.loads(capsys.readouterr().out)
+    assert reclaimed["id"] == task["id"]
+
+
+def test_superseded_task_is_terminal_and_unblocks_dependencies(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "superseded-project"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("superseded-project")
+    workitem = storage.create_workitem(project["id"], "Replace duplicate task")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    first = storage.create_task(workflow["id"], "Old duplicate", kind="impl", profile="coder")
+    second = storage.create_task(workflow["id"], "Continue after replacement", kind="command", profile="command", depends_on=[first["id"]], prompt_text="true")
+
+    assert main(["task", "complete", str(project_root), first["id"], "--status", "superseded", "--result-json", '{"reason":"replacement task succeeded"}']) == 0
+    capsys.readouterr()
+    tasks = {task["id"]: task for task in storage.list_tasks(workflow["id"])}
+
+    assert tasks[first["id"]]["status"] == "superseded"
+    assert tasks[second["id"]]["status"] == "ready"
+
+    summary = ProjectRuntime(storage).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_succeeded == 1
+    assert summary.failed == []
+    assert summary.open == []
+    assert summary.blocked == []
 
 
 def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) -> None:

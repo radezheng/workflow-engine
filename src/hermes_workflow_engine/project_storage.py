@@ -17,6 +17,10 @@ class ProjectStorageError(ValueError):
     """Raised when a project storage operation is invalid."""
 
 
+TASK_DONE_STATUSES = {"succeeded", "skipped", "superseded"}
+TASK_TERMINAL_STATUSES = {*TASK_DONE_STATUSES, "failed", "cancelled"}
+
+
 @dataclass(frozen=True)
 class ProjectPaths:
     project_root: Path
@@ -359,7 +363,7 @@ class ProjectStorage:
                     SELECT 1
                     FROM task_dependencies dependency
                     JOIN tasks upstream ON upstream.id = dependency.depends_on_task_id
-                    WHERE dependency.task_id = task.id AND upstream.status != 'succeeded'
+                    WHERE dependency.task_id = task.id AND upstream.status NOT IN ('succeeded', 'skipped', 'superseded')
                   )
                 """,
                 (workflow_id,),
@@ -423,6 +427,24 @@ class ProjectStorage:
                 (timestamp, timestamp, task_id),
             )
         self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_claim_released", {"reason": reason})
+        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_ready", {"reason": reason})
+        return self.get_task(task_id)
+
+    def retry_task(self, task_id: str, *, reason: str = "retry") -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if task["status"] not in {"failed", "cancelled"}:
+            raise ProjectStorageError(f"Task is not retryable: {task_id}")
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET status='ready', ready_at=?, completed_at=NULL, updated_at=? WHERE id=?",
+                (timestamp, timestamp, task_id),
+            )
+            connection.execute(
+                "UPDATE worker_claims SET status='released', released_at=?, release_reason=? WHERE task_id=? AND status='claimed'",
+                (timestamp, reason, task_id),
+            )
+        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_retry", {"reason": reason})
         self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_ready", {"reason": reason})
         return self.get_task(task_id)
 
@@ -506,7 +528,7 @@ class ProjectStorage:
         evidence: list[str] | None = None,
         requested_by: str | None = None,
     ) -> dict[str, Any]:
-        if status not in {"succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"}:
+        if status not in {"succeeded", "failed", "cancelled", "skipped", "superseded", "waiting_for_info", "waiting_for_approval"}:
             raise ProjectStorageError(f"Unsupported completion status: {status}")
         if status in {"waiting_for_info", "waiting_for_approval"}:
             kind = "info_request" if status == "waiting_for_info" else "approval_request"
@@ -529,7 +551,7 @@ class ProjectStorage:
         with self.connect() as connection:
             connection.execute(
                 "UPDATE tasks SET status=?, completed_at=?, updated_at=? WHERE id=?",
-                (status, timestamp if status in {"succeeded", "failed", "cancelled"} else None, timestamp, task_id),
+                (status, timestamp if status in TASK_TERMINAL_STATUSES else None, timestamp, task_id),
             )
             connection.execute(
                 "UPDATE worker_claims SET status='released', released_at=?, release_reason=? WHERE task_id=? AND status='claimed'",

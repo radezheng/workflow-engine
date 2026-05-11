@@ -5,6 +5,7 @@ import json
 import shlex
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import HWEConfig, load_config
-from .project_storage import ProjectStorage
+from .project_storage import ProjectStorage, TASK_DONE_STATUSES
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class ProjectRunSummary:
     tasks_failed: int
     waiting_for_human: int
     blocked: list[str]
+    failed: list[str]
+    open: list[str]
 
 
 class ProjectRuntime:
@@ -64,8 +67,11 @@ class ProjectRuntime:
                 tasks_failed += 1
                 break
 
-        blocked = [task["id"] for task in self.storage.list_tasks(workflow_id) if task["status"] not in {"succeeded"}]
-        return ProjectRunSummary(project_id, workitem_id, workflow_id, tasks_started, tasks_succeeded, tasks_failed, waiting_for_human, blocked)
+        tasks = self.storage.list_tasks(workflow_id)
+        failed = [task["id"] for task in tasks if task["status"] in {"failed", "cancelled"}]
+        blocked = [task["id"] for task in tasks if task["status"] == "pending"]
+        open_tasks = [task["id"] for task in tasks if task["status"] not in TASK_DONE_STATUSES and task["status"] not in {"failed", "cancelled"}]
+        return ProjectRunSummary(project_id, workitem_id, workflow_id, tasks_started, tasks_succeeded, tasks_failed, waiting_for_human, blocked, failed, open_tasks)
 
     def run_task(self, task: dict[str, Any]) -> str:
         run = self.storage.create_task_run(task["id"], claim_id=task.get("claim_id"), profile=task.get("profile"))
@@ -77,6 +83,9 @@ class ProjectRuntime:
 
         if task["kind"] == "command":
             status, exit_code, result = self._run_command_task(task, stdout_path, stderr_path)
+            prompt_for_run = None
+        elif task["kind"] == "http_check":
+            status, exit_code, result = self._run_http_check_task(task, stdout_path, stderr_path)
             prompt_for_run = None
         else:
             prompt_text = self._build_prompt(task)
@@ -120,6 +129,116 @@ class ProjectRuntime:
         stderr_path.write_text(completed.stderr, encoding="utf-8")
         status = "succeeded" if completed.returncode == 0 else "failed"
         return status, completed.returncode, {"command": command}
+
+    def _run_http_check_task(self, task: dict[str, Any], stdout_path: Path, stderr_path: Path) -> tuple[str, int | None, dict[str, Any]]:
+        try:
+            spec = self._http_check_spec(task)
+        except ValueError as exc:
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text(f"{exc}\n", encoding="utf-8")
+            return "failed", None, {"error": str(exc)}
+
+        if self.dry_run:
+            stdout_path.write_text(f"DRY RUN: would run {len(spec)} HTTP check(s)\n", encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
+            return "succeeded", 0, {"dry_run": True, "checks": len(spec)}
+
+        results: list[dict[str, Any]] = []
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        for index, check in enumerate(spec, start=1):
+            ok, result, detail = self._run_single_http_check(check)
+            results.append(result)
+            stdout_lines.append(f"[{index}] {result['method']} {result['url']} -> {result.get('status')} {result['status_text']}")
+            if detail:
+                stdout_lines.append(detail)
+            if not ok:
+                stderr_lines.append(result["error"])
+
+        stdout_path.write_text("\n".join(stdout_lines) + ("\n" if stdout_lines else ""), encoding="utf-8")
+        stderr_path.write_text("\n".join(stderr_lines) + ("\n" if stderr_lines else ""), encoding="utf-8")
+        status = "succeeded" if not stderr_lines else "failed"
+        return status, 0 if status == "succeeded" else 1, {"checks": results}
+
+    def _http_check_spec(self, task: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = (task.get("prompt_text") or "").strip()
+        if not raw:
+            raise ValueError("HTTP check task has no --prompt-text URL or JSON spec.")
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return [{"url": raw}]
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"HTTP check prompt is not a URL or JSON: {exc}") from exc
+        checks = parsed.get("requests", parsed if isinstance(parsed, list) else [parsed])
+        if not isinstance(checks, list) or not checks:
+            raise ValueError("HTTP check JSON must define at least one request.")
+        normalized = []
+        for check in checks:
+            if not isinstance(check, dict) or not check.get("url"):
+                raise ValueError("Each HTTP check request must be an object with a url.")
+            normalized.append(check)
+        return normalized
+
+    def _run_single_http_check(self, check: dict[str, Any]) -> tuple[bool, dict[str, Any], str]:
+        method = str(check.get("method", "GET")).upper()
+        url = str(check["url"])
+        headers = {str(key): str(value) for key, value in check.get("headers", {}).items()} if isinstance(check.get("headers", {}), dict) else {}
+        body = None
+        if "json" in check:
+            body = json.dumps(check["json"]).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
+        elif "body" in check:
+            body = str(check["body"]).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        expect_status = int(check.get("expect_status", 200))
+        retries = int(check.get("retries", 5))
+        retry_delay_seconds = float(check.get("retry_delay_seconds", 1))
+        timeout = float(check.get("timeout_seconds", 30))
+        last_result: dict[str, Any] = {"method": method, "url": url, "status": None, "status_text": "failed", "error": "not attempted"}
+        last_detail = ""
+        for attempt in range(max(1, retries)):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    response_text = response.read().decode("utf-8", errors="replace")
+                    last_result, last_detail = self._evaluate_http_response(check, method, url, response.status, response_text, expect_status)
+            except urllib.error.HTTPError as exc:
+                response_text = exc.read().decode("utf-8", errors="replace")
+                last_result, last_detail = self._evaluate_http_response(check, method, url, exc.code, response_text, expect_status)
+            except urllib.error.URLError as exc:
+                last_result = {"method": method, "url": url, "status": None, "status_text": "failed", "error": str(exc)}
+                last_detail = ""
+            if last_result["status_text"] == "ok":
+                return True, last_result, last_detail
+            if attempt < retries - 1:
+                time.sleep(retry_delay_seconds)
+        return False, last_result, last_detail
+
+    def _evaluate_http_response(self, check: dict[str, Any], method: str, url: str, status: int, response_text: str, expect_status: int) -> tuple[dict[str, Any], str]:
+        result: dict[str, Any] = {"method": method, "url": url, "status": status, "status_text": "ok"}
+        errors: list[str] = []
+        if status != expect_status:
+            errors.append(f"expected HTTP {expect_status}, got {status}")
+        if "expect_contains" in check and str(check["expect_contains"]) not in response_text:
+            errors.append("response did not contain expected text")
+        if "expect_json" in check:
+            try:
+                response_json = json.loads(response_text)
+            except json.JSONDecodeError:
+                errors.append("response was not JSON")
+            else:
+                expected = check["expect_json"]
+                if isinstance(expected, dict) and isinstance(response_json, dict):
+                    for key, value in expected.items():
+                        if response_json.get(key) != value:
+                            errors.append(f"JSON field {key!r} expected {value!r}, got {response_json.get(key)!r}")
+                elif response_json != expected:
+                    errors.append("response JSON did not equal expected JSON")
+        detail = response_text[:4096]
+        if errors:
+            result["status_text"] = "failed"
+            result["error"] = "; ".join(errors)
+        return result, detail
 
     def _run_agent_task(
         self,
@@ -241,6 +360,8 @@ class ProjectRuntime:
         healthcheck = profile_config.get("healthcheck")
         if not isinstance(healthcheck, dict) or not healthcheck.get("url"):
             return
+        retries = int(healthcheck.get("retries", 5))
+        retry_delay_seconds = float(healthcheck.get("retry_delay_seconds", 2))
         payload = {
             "model": healthcheck.get("model", profile_config.get("model", "")),
             "messages": [{"role": "user", "content": "healthcheck"}],
@@ -252,12 +373,18 @@ class ProjectRuntime:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                if response.status >= 400:
-                    raise RuntimeError(f"Model healthcheck failed with HTTP {response.status}")
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Model healthcheck failed: {exc}") from exc
+        last_error: Exception | None = None
+        for attempt in range(max(1, retries)):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    if response.status < 400:
+                        return
+                    last_error = RuntimeError(f"Model healthcheck failed with HTTP {response.status}")
+            except urllib.error.URLError as exc:
+                last_error = exc
+            if attempt < retries - 1:
+                time.sleep(retry_delay_seconds)
+        raise RuntimeError(f"Model healthcheck failed: {last_error}")
 
     def _is_success_exit_code(self, exit_code: int, profile_config: dict[str, Any]) -> bool:
         success_exit_codes = profile_config.get("success_exit_codes", [0])

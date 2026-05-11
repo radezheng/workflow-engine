@@ -137,10 +137,14 @@ def main(argv: list[str] | None = None) -> int:
     task_release.add_argument("project")
     task_release.add_argument("task_id")
     task_release.add_argument("--reason", default="released")
+    task_retry = task_subparsers.add_parser("retry", help="Retry a failed or cancelled task by returning it to ready.")
+    task_retry.add_argument("project")
+    task_retry.add_argument("task_id")
+    task_retry.add_argument("--reason", default="retry")
     task_complete = task_subparsers.add_parser("complete", help="Complete a claimed task.")
     task_complete.add_argument("project")
     task_complete.add_argument("task_id")
-    task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"])
+    task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "skipped", "superseded", "waiting_for_info", "waiting_for_approval"])
     task_complete.add_argument("--result-json", default=None)
     task_complete.add_argument("--title", default=None, help="Human action title when status waits for information or approval.")
     task_complete.add_argument("--body", default=None, help="Human action body when status waits for information or approval.")
@@ -415,6 +419,9 @@ def _handle_task(args: argparse.Namespace) -> int:
         return 0 if task else 1
     if args.task_command == "release":
         _print_json(storage.release_task_claim(args.task_id, reason=args.reason))
+        return 0
+    if args.task_command == "retry":
+        _print_json(storage.retry_task(args.task_id, reason=args.reason))
         return 0
     if args.task_command == "complete":
         _print_json(

@@ -86,6 +86,8 @@ profiles:
     healthcheck:
       url: http://127.0.0.1:1234/v1/chat/completions
       model: coder-model
+      retries: 5
+      retry_delay_seconds: 2
 ```
 
 `run-workitem` runs `switch_command` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
@@ -177,9 +179,43 @@ To run the ready task queue directly from the CLI, use `run-workitem`. This is t
 hwe run-workitem my-project "$WORKITEM_ID" --dry-run --max-tasks 1
 ```
 
-For `kind=command` tasks, `--prompt-text` is treated as the shell command and runs from the project root. For agent tasks, HWE combines the role prompt template, task prompt, work item context, declared skills, outputs, and gates into `.engine/runs/<run-id>/prompt.md`, then invokes the task profile through Hermes. `--dry-run` writes prompts and logs without invoking Hermes or running shell commands.
+For `kind=command` tasks, `--prompt-text` is treated as the shell command and runs from the project root. For `kind=http_check` tasks, `--prompt-text` is either a URL or a JSON smoke-test spec that HWE runs with retries. For agent tasks, HWE combines the role prompt template, task prompt, work item context, declared skills, outputs, and gates into `.engine/runs/<run-id>/prompt.md`, then invokes the task profile through Hermes. `--dry-run` writes prompts and logs without invoking Hermes or running shell commands.
 
-When a task is completed with `hwe task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
+Example HTTP smoke task:
+
+```bash
+hwe task create my-project "$WORKFLOW_ID" "Smoke: backend and UI" \
+  --kind http_check \
+  --profile command \
+  --prompt-text '{
+    "requests": [
+      {"url": "http://127.0.0.1:8000/health", "expect_status": 200, "expect_json": {"status": "healthy"}},
+      {"url": "http://127.0.0.1:3000", "expect_status": 200, "expect_contains": "Notes"}
+    ]
+  }'
+```
+
+Each HTTP request supports `method`, `headers`, `json`, `body`, `expect_status`, `expect_json`, `expect_contains`, `retries`, `retry_delay_seconds`, and `timeout_seconds`. This is intended for final runtime checks such as backend health, API create/list/search, and frontend page compilation after separate command tasks have started the app or after the user has started project servers.
+
+When a task is completed with `hwe task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically. `skipped` and `superseded` are also terminal dependency-satisfying statuses for obsolete or duplicate work. Use them deliberately, with a result reason, when a replacement task has already delivered the intended output:
+
+```bash
+hwe task complete my-project "$OLD_TASK_ID" \
+  --status superseded \
+  --result-json '{"reason":"replacement backend init task succeeded"}'
+```
+
+Transient failures can be returned to `ready` without losing run history:
+
+```bash
+hwe task retry my-project "$TASK_ID" --reason transient-healthcheck
+```
+
+If a command is cancelled and leaves a task claimed, release the claim back to `ready`:
+
+```bash
+hwe task release my-project "$TASK_ID" --reason cancelled-run
+```
 
 Tasks can also pause for human input or approval. Completing a task with `waiting_for_info` or `waiting_for_approval` creates a pending human action and releases the worker claim:
 
