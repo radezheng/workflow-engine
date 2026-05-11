@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from hermes_workflow_engine.config import HWEConfig, default_config_path
+from hermes_workflow_engine.config import HWEConfig, default_config_path, load_config
 from hermes_workflow_engine.runtime import WorkflowRuntime
 from hermes_workflow_engine.spec import load_workflow
 from hermes_workflow_engine.storage import Storage
@@ -111,6 +111,30 @@ def test_default_config_path_walks_up_to_project_local_file(tmp_path: Path, monk
     monkeypatch.chdir(nested)
 
     assert default_config_path() == config_path
+
+
+def test_prompt_template_root_defaults_to_hwe_config_directory(tmp_path: Path, monkeypatch) -> None:
+    hwe_root = tmp_path / "hwe"
+    nested = hwe_root / "subdir"
+    nested.mkdir(parents=True)
+    config_path = hwe_root / "hwe.config.yaml"
+    config_path.write_text("default_workspace_root: /tmp/hermes-projects\n", encoding="utf-8")
+
+    monkeypatch.chdir(nested)
+    config = load_config()
+
+    assert config.prompt_template_root == hwe_root / "ptemplate"
+
+
+def test_prompt_template_root_config_is_relative_to_hwe_config_directory(tmp_path: Path) -> None:
+    hwe_root = tmp_path / "hwe"
+    hwe_root.mkdir()
+    config_path = hwe_root / "hwe.config.yaml"
+    config_path.write_text("prompt_template_root: ./role-prompts\n", encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.prompt_template_root == hwe_root / "role-prompts"
 
 
 def test_hermes_profile_command_uses_current_cli_shape(tmp_path: Path) -> None:

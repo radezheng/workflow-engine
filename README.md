@@ -62,7 +62,7 @@ Machine-specific defaults belong in HWE config, not in skills or workflow templa
 Create or inspect the local config with:
 
 ```bash
-hwe config init --default-workspace-root ~/workspaces/hermes
+hwe config init --default-workspace-root ~/workspaces/hermes --prompt-template-root ./ptemplate
 hwe config show
 hwe config path
 ```
@@ -71,7 +71,10 @@ When a workflow omits `workflow.workspace`, HWE uses `default_workspace_root` fr
 
 ```yaml
 default_workspace_root: ~/workspaces/hermes
+prompt_template_root: ./ptemplate
 ```
+
+`prompt_template_root` is an HWE-side template library path, not a target project path. Relative values are resolved from the directory containing `hwe.config.yaml`; the default is `./ptemplate`.
 
 Then a workflow can specify only the project name:
 
@@ -170,6 +173,8 @@ hwe task create my-project "$WORKFLOW_ID" "Review implementation" \
   --prompt-template-id "$TEMPLATE_ID" \
   --skill hermes-project-workflow
 ```
+
+If `--body` and `--body-file` are omitted, HWE reads the template from `<prompt_template_root>/<role>/<name>.md`, for example `./ptemplate/reviewer/implementation-review.md`. Relative `--body-file` paths are also resolved from `prompt_template_root`.
 
 ## Current Validator Names
 

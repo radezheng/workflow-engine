@@ -153,6 +153,8 @@ Examples:
 
 Templates should be versioned by `role`, `name`, and `version`. A task may reference a template by id and may still include task-specific prompt text. This lets the project accumulate stable role guidance without copying the same best-practice text into every task.
 
+HWE keeps prompt template source files in its own configured template root, defaulting to `./ptemplate` relative to `hwe.config.yaml`. This is the workflow-engine operator's template library, not a path inside the target project. Creating a project role template can read `<prompt_template_root>/<role>/<name>.md` and store that content in the project's `.engine` database.
+
 ### 4.8 Worker
 
 Workers execute tasks from the queue. They should not make broad product decisions.
@@ -611,4 +613,4 @@ human request
   -> checkpoint and close
 ```
 
-The important additions over V1 are work items, conversations, task queue leases, missing-information pauses, human approval gates, planner decisions, and installable schema.
+The important additions over the static workflow model are work items, conversations, task queue leases, missing-information pauses, human approval gates, planner decisions, and installable schema.

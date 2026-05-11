@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     config_subparsers.add_parser("show", help="Print the active HWE config as JSON.")
     config_init = config_subparsers.add_parser("init", help="Create an HWE config file.")
     config_init.add_argument("--default-workspace-root", default="~/workspaces/hermes")
+    config_init.add_argument("--prompt-template-root", default="./ptemplate")
     config_init.add_argument("--force", action="store_true", help="Overwrite an existing config file.")
 
     project_parser = subparsers.add_parser("project", help="Manage projects.")
@@ -210,11 +211,15 @@ def _handle_config(args: argparse.Namespace) -> int:
             "path": str(config.source_path) if config.source_path else None,
             "exists": bool(config.source_path and config.source_path.exists()),
             "default_workspace_root": str(config.default_workspace_root) if config.default_workspace_root else None,
+            "prompt_template_root": str(config.prompt_template_root) if config.prompt_template_root else None,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     if args.config_command == "init":
-        config = HWEConfig(default_workspace_root=Path(args.default_workspace_root).expanduser())
+        config = HWEConfig(
+            default_workspace_root=Path(args.default_workspace_root).expanduser(),
+            prompt_template_root=Path(args.prompt_template_root).expanduser(),
+        )
         path = write_config(config, force=args.force)
         print(f"created HWE config: {path}")
         return 0
@@ -267,7 +272,14 @@ def _handle_prompt_template(args: argparse.Namespace) -> int:
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.prompt_template_command == "create":
         _ensure_project(storage, project_id)
-        body = _body_text(args.body, args.body_file, "prompt template body")
+        config = load_config()
+        body = _body_text(
+            args.body,
+            args.body_file,
+            "prompt template body",
+            base_dir=config.prompt_template_root,
+            default_file=Path(args.role) / f"{args.name}.md",
+        )
         _print_json(
             storage.create_role_prompt_template(
                 project_id,
@@ -346,13 +358,28 @@ def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _body_text(body: str | None, body_file: str | None, label: str) -> str:
+def _body_text(
+    body: str | None,
+    body_file: str | None,
+    label: str,
+    *,
+    base_dir: Path | None = None,
+    default_file: Path | None = None,
+) -> str:
     if body and body_file:
         raise ProjectStorageError(f"Provide either --body or --body-file for {label}, not both.")
     if body_file:
-        return Path(body_file).expanduser().read_text(encoding="utf-8")
+        path = Path(body_file).expanduser()
+        if not path.is_absolute() and base_dir is not None:
+            path = base_dir / path
+        return path.read_text(encoding="utf-8")
     if body:
         return body
+    if default_file is not None and base_dir is not None:
+        path = base_dir / default_file
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        raise ProjectStorageError(f"Missing {label}; provide --body, --body-file, or create {path}.")
     raise ProjectStorageError(f"Missing {label}; provide --body or --body-file.")
 
 

@@ -115,3 +115,33 @@ def test_prompt_template_cli_creates_template(tmp_path: Path, capsys) -> None:
     assert payload["name"] == "qa-review"
     assert payload["body_md"] == "Reject missing tests and unsafe changes."
     assert payload["tags"] == ["qa"]
+
+
+def test_prompt_template_cli_uses_hwe_template_root(tmp_path: Path, capsys, monkeypatch) -> None:
+    hwe_root = tmp_path / "hwe"
+    template_root = hwe_root / "ptemplate"
+    template_dir = template_root / "reviewer"
+    template_dir.mkdir(parents=True)
+    (template_dir / "qa-review.md").write_text("Review for correctness and regression risk.", encoding="utf-8")
+    (hwe_root / "hwe.config.yaml").write_text("prompt_template_root: ./ptemplate\n", encoding="utf-8")
+    monkeypatch.chdir(hwe_root)
+
+    project_root = tmp_path / "template-project"
+    assert main(["project", "init", str(project_root), "--id", "template-project"]) == 0
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "prompt-template",
+            "create",
+            str(project_root),
+            "reviewer",
+            "qa-review",
+            "--project-id",
+            "template-project",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["body_md"] == "Review for correctness and regression risk."

@@ -15,6 +15,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class HWEConfig:
     default_workspace_root: Path | None = None
+    prompt_template_root: Path | None = None
     source_path: Path | None = None
     raw: dict[str, Any] | None = None
 
@@ -40,7 +41,7 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
     if not config_path.exists():
         if path or os.environ.get("HWE_CONFIG"):
             raise ConfigError(f"HWE config does not exist: {config_path}")
-        return HWEConfig(source_path=config_path, raw={})
+        return HWEConfig(prompt_template_root=(config_path.parent / "ptemplate").resolve(), source_path=config_path, raw={})
 
     with config_path.open("r", encoding="utf-8") as file:
         raw = yaml.safe_load(file) or {}
@@ -54,7 +55,12 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
             raise ConfigError("`default_workspace_root` must be a non-empty string when provided.")
         default_workspace_root = Path(workspace_value).expanduser().resolve()
 
-    return HWEConfig(default_workspace_root=default_workspace_root, source_path=config_path, raw=raw)
+    prompt_template_value = raw.get("prompt_template_root", "./ptemplate")
+    if not isinstance(prompt_template_value, str) or not prompt_template_value.strip():
+        raise ConfigError("`prompt_template_root` must be a non-empty string.")
+    prompt_template_root = _resolve_config_path(config_path, prompt_template_value)
+
+    return HWEConfig(default_workspace_root=default_workspace_root, prompt_template_root=prompt_template_root, source_path=config_path, raw=raw)
 
 
 def write_config(config: HWEConfig, path: str | Path | None = None, *, force: bool = False) -> Path:
@@ -65,6 +71,15 @@ def write_config(config: HWEConfig, path: str | Path | None = None, *, force: bo
     raw: dict[str, Any] = dict(config.raw or {})
     if config.default_workspace_root is not None:
         raw["default_workspace_root"] = str(config.default_workspace_root.expanduser())
+    if config.prompt_template_root is not None:
+        raw["prompt_template_root"] = str(config.prompt_template_root.expanduser())
     with config_path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(raw, file, sort_keys=False)
     return config_path
+
+
+def _resolve_config_path(config_path: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (config_path.parent / path).resolve()
