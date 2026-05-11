@@ -159,6 +159,23 @@ hwe task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile re
 
 When a task is completed with `hwe task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
 
+Tasks can also pause for human input or approval. Completing a task with `waiting_for_info` or `waiting_for_approval` creates a pending human action and releases the worker claim:
+
+```bash
+hwe task complete my-project "$TASK_ID" \
+  --status waiting_for_info \
+  --title "Choose persistence target" \
+  --body "Should notes use PostgreSQL or browser storage?" \
+  --question "Where should notes be stored?" \
+  --option PostgreSQL \
+  --option "Local browser only"
+
+hwe human-action list my-project --status pending
+hwe answer my-project "$HUMAN_ACTION_ID" --text "Use PostgreSQL"
+```
+
+For approval requests, use `hwe approve <project> <human-action-id>` or `hwe reject <project> <human-action-id> --reason "..."`. Answering or approving an action moves the waiting task back to `ready`; rejecting it marks the task `failed` so dependent tasks stay blocked.
+
 Role prompt templates let a project accumulate reusable planner, reviewer, QA, or coder instructions. Tasks can reference a template and declare the skills they expect:
 
 ```bash

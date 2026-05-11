@@ -127,6 +127,65 @@ def main(argv: list[str] | None = None) -> int:
     task_complete.add_argument("project")
     task_complete.add_argument("task_id")
     task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"])
+    task_complete.add_argument("--result-json", default=None)
+    task_complete.add_argument("--title", default=None, help="Human action title when status waits for information or approval.")
+    task_complete.add_argument("--body", default=None, help="Human action body when status waits for information or approval.")
+    task_complete.add_argument("--question", action="append", default=[])
+    task_complete.add_argument("--option", action="append", default=[])
+    task_complete.add_argument("--evidence", action="append", default=[])
+    task_complete.add_argument("--requested-by", default=None)
+
+    human_action_parser = subparsers.add_parser("human-action", help="Manage pending human information and approval requests.")
+    human_action_subparsers = human_action_parser.add_subparsers(dest="human_action_command", required=True)
+    human_action_list = human_action_subparsers.add_parser("list", help="List human actions for a project.")
+    human_action_list.add_argument("project")
+    human_action_list.add_argument("--project-id", default=None)
+    human_action_list.add_argument("--status", default=None)
+    human_action_list.add_argument("--kind", default=None, choices=["info_request", "approval_request"])
+    human_action_show = human_action_subparsers.add_parser("show", help="Show a human action.")
+    human_action_show.add_argument("project")
+    human_action_show.add_argument("human_action_id")
+    human_action_show.add_argument("--project-id", default=None)
+    human_action_answer = human_action_subparsers.add_parser("answer", help="Answer an information request.")
+    human_action_answer.add_argument("project")
+    human_action_answer.add_argument("human_action_id")
+    human_action_answer.add_argument("--project-id", default=None)
+    human_action_answer.add_argument("--text", required=True)
+    human_action_answer.add_argument("--by", dest="resolved_by", default=None)
+    human_action_approve = human_action_subparsers.add_parser("approve", help="Approve an approval request.")
+    human_action_approve.add_argument("project")
+    human_action_approve.add_argument("human_action_id")
+    human_action_approve.add_argument("--project-id", default=None)
+    human_action_approve.add_argument("--text", default="")
+    human_action_approve.add_argument("--by", dest="resolved_by", default=None)
+    human_action_reject = human_action_subparsers.add_parser("reject", help="Reject a human action.")
+    human_action_reject.add_argument("project")
+    human_action_reject.add_argument("human_action_id")
+    human_action_reject.add_argument("--project-id", default=None)
+    human_action_reject.add_argument("--reason", required=True)
+    human_action_reject.add_argument("--by", dest="resolved_by", default=None)
+
+    answer_parser = subparsers.add_parser("answer", help="Answer an information request.")
+    answer_parser.add_argument("project")
+    answer_parser.add_argument("human_action_id")
+    answer_parser.add_argument("--project-id", default=None)
+    answer_parser.add_argument("--text", required=True)
+    answer_parser.add_argument("--by", dest="resolved_by", default=None)
+    answer_parser.set_defaults(human_action_command="answer")
+    approve_parser = subparsers.add_parser("approve", help="Approve an approval request.")
+    approve_parser.add_argument("project")
+    approve_parser.add_argument("human_action_id")
+    approve_parser.add_argument("--project-id", default=None)
+    approve_parser.add_argument("--text", default="")
+    approve_parser.add_argument("--by", dest="resolved_by", default=None)
+    approve_parser.set_defaults(human_action_command="approve")
+    reject_parser = subparsers.add_parser("reject", help="Reject a human action.")
+    reject_parser.add_argument("project")
+    reject_parser.add_argument("human_action_id")
+    reject_parser.add_argument("--project-id", default=None)
+    reject_parser.add_argument("--reason", required=True)
+    reject_parser.add_argument("--by", dest="resolved_by", default=None)
+    reject_parser.set_defaults(human_action_command="reject")
 
     args = parser.parse_args(argv)
 
@@ -143,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_workflow(args)
         if args.command == "task":
             return _handle_task(args)
+        if args.command in {"human-action", "answer", "approve", "reject"}:
+            return _handle_human_action(args)
 
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
@@ -337,7 +398,65 @@ def _handle_task(args: argparse.Namespace) -> int:
         _print_json(task or {})
         return 0 if task else 1
     if args.task_command == "complete":
-        _print_json(storage.complete_task(args.task_id, status=args.status))
+        _print_json(
+            storage.complete_task(
+                args.task_id,
+                status=args.status,
+                result=_json_option(args.result_json, "--result-json"),
+                human_action_title=args.title,
+                human_action_body=args.body,
+                questions=_question_options(args.question),
+                options=args.option,
+                evidence=args.evidence,
+                requested_by=args.requested_by,
+            )
+        )
+        return 0
+    return 2
+
+
+def _handle_human_action(args: argparse.Namespace) -> int:
+    storage = _project_storage(args.project)
+    project_id = args.project_id or Path(args.project).expanduser().name
+    command = args.human_action_command
+    if command == "list":
+        _print_json(storage.list_human_actions(project_id, status=args.status, kind=args.kind))
+        return 0
+    if command == "show":
+        action = storage.get_human_action(args.human_action_id)
+        if action["project_id"] != project_id:
+            raise ProjectStorageError("Human action does not belong to project.")
+        _print_json(action)
+        return 0
+    if command == "answer":
+        _print_json(
+            storage.resolve_human_action(
+                args.human_action_id,
+                resolution="answered",
+                response={"text": args.text},
+                resolved_by=args.resolved_by,
+            )
+        )
+        return 0
+    if command == "approve":
+        _print_json(
+            storage.resolve_human_action(
+                args.human_action_id,
+                resolution="approved",
+                response={"text": args.text},
+                resolved_by=args.resolved_by,
+            )
+        )
+        return 0
+    if command == "reject":
+        _print_json(
+            storage.resolve_human_action(
+                args.human_action_id,
+                resolution="rejected",
+                response={"reason": args.reason},
+                resolved_by=args.resolved_by,
+            )
+        )
         return 0
     return 2
 
@@ -356,6 +475,22 @@ def _ensure_project(storage: ProjectStorage, project_id: str) -> None:
 
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _json_option(value: str | None, label: str) -> dict[str, object] | None:
+    if value is None:
+        return None
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ProjectStorageError(f"{label} must be valid JSON: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise ProjectStorageError(f"{label} must be a JSON object.")
+    return payload
+
+
+def _question_options(questions: list[str]) -> list[dict[str, object]]:
+    return [{"id": f"q{index}", "question": question} for index, question in enumerate(questions, start=1)]
 
 
 def _body_text(

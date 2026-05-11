@@ -399,9 +399,37 @@ class ProjectStorage:
         self.event(claimed["project_id"], claimed["workitem_id"], workflow_id, claimed["id"], "task_claimed", {"worker_id": worker_id, "claim_id": claim_id})
         return claimed
 
-    def complete_task(self, task_id: str, *, status: str = "succeeded", result: dict[str, Any] | None = None) -> dict[str, Any]:
+    def complete_task(
+        self,
+        task_id: str,
+        *,
+        status: str = "succeeded",
+        result: dict[str, Any] | None = None,
+        human_action_title: str | None = None,
+        human_action_body: str | None = None,
+        questions: list[dict[str, Any]] | None = None,
+        options: list[str] | None = None,
+        evidence: list[str] | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
         if status not in {"succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"}:
             raise ProjectStorageError(f"Unsupported completion status: {status}")
+        if status in {"waiting_for_info", "waiting_for_approval"}:
+            kind = "info_request" if status == "waiting_for_info" else "approval_request"
+            action = self.request_human_action_for_task(
+                task_id,
+                kind=kind,
+                title=human_action_title,
+                body=human_action_body,
+                questions=questions,
+                options=options,
+                evidence=evidence,
+                requested_by=requested_by,
+                result=result,
+            )
+            task = self.get_task(task_id)
+            task["human_action"] = action
+            return task
         task = self.get_task(task_id)
         timestamp = now_iso()
         with self.connect() as connection:
@@ -416,6 +444,203 @@ class ProjectStorage:
         self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_completed", {"status": status, "result": result or {}})
         self.mark_ready_tasks(task["workflow_id"])
         return self.get_task(task_id)
+
+    def request_human_action_for_task(
+        self,
+        task_id: str,
+        *,
+        kind: str,
+        title: str | None = None,
+        body: str | None = None,
+        questions: list[dict[str, Any]] | None = None,
+        options: list[str] | None = None,
+        evidence: list[str] | None = None,
+        requested_by: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if kind not in {"info_request", "approval_request"}:
+            raise ProjectStorageError(f"Unsupported human action kind: {kind}")
+        task = self.get_task(task_id)
+        status = "waiting_for_info" if kind == "info_request" else "waiting_for_approval"
+        default_title = "Information needed" if kind == "info_request" else "Approval needed"
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET status=?, completed_at=NULL, updated_at=? WHERE id=?",
+                (status, timestamp, task_id),
+            )
+            connection.execute(
+                "UPDATE worker_claims SET status='released', released_at=?, release_reason=? WHERE task_id=? AND status='claimed'",
+                (timestamp, status, task_id),
+            )
+        action = self.create_human_action(
+            task["project_id"],
+            kind=kind,
+            title=title or default_title,
+            body=body or _json(result or {}),
+            workitem_id=task["workitem_id"],
+            workflow_id=task["workflow_id"],
+            task_id=task_id,
+            questions=questions,
+            options=options,
+            evidence=evidence,
+            requested_by=requested_by or task.get("profile"),
+        )
+        self.event(
+            task["project_id"],
+            task["workitem_id"],
+            task["workflow_id"],
+            task_id,
+            "task_completed",
+            {"status": status, "result": result or {}, "human_action_id": action["id"]},
+            human_action_id=action["id"],
+        )
+        return action
+
+    def create_human_action(
+        self,
+        project_id: str,
+        *,
+        kind: str,
+        title: str,
+        body: str,
+        workitem_id: str | None = None,
+        workflow_id: str | None = None,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        conversation_id: str | None = None,
+        questions: list[dict[str, Any]] | None = None,
+        options: list[str] | None = None,
+        evidence: list[str] | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        if kind not in {"info_request", "approval_request"}:
+            raise ProjectStorageError(f"Unsupported human action kind: {kind}")
+        self.get_project(project_id)
+        timestamp = now_iso()
+        action_id = _id("human")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO human_actions(id, project_id, workitem_id, workflow_id, task_id, run_id, conversation_id, kind, status, title, body, questions_json, options_json, evidence_json, requested_by, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action_id,
+                    project_id,
+                    workitem_id,
+                    workflow_id,
+                    task_id,
+                    run_id,
+                    conversation_id,
+                    kind,
+                    title,
+                    body,
+                    _json(questions or []),
+                    _json(options or []),
+                    _json(evidence or []),
+                    requested_by,
+                    timestamp,
+                ),
+            )
+        self.event(
+            project_id,
+            workitem_id,
+            workflow_id,
+            task_id,
+            "human_action_requested",
+            {"kind": kind, "title": title, "human_action_id": action_id},
+            run_id=run_id,
+            human_action_id=action_id,
+        )
+        return self.get_human_action(action_id)
+
+    def get_human_action(self, action_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM human_actions WHERE id=?", (action_id,)).fetchone()
+        if row is None:
+            raise ProjectStorageError(f"Unknown human action: {action_id}")
+        return self._decode_human_action(dict(row))
+
+    def list_human_actions(self, project_id: str, *, status: str | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+        self.get_project(project_id)
+        query = "SELECT * FROM human_actions WHERE project_id=?"
+        params: list[Any] = [project_id]
+        if status:
+            query += " AND status=?"
+            params.append(status)
+        if kind:
+            query += " AND kind=?"
+            params.append(kind)
+        query += " ORDER BY created_at, id"
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._decode_human_action(dict(row)) for row in rows]
+
+    def resolve_human_action(
+        self,
+        action_id: str,
+        *,
+        resolution: str,
+        response: dict[str, Any] | None = None,
+        resolved_by: str | None = None,
+    ) -> dict[str, Any]:
+        if resolution not in {"answered", "approved", "rejected"}:
+            raise ProjectStorageError(f"Unsupported human action resolution: {resolution}")
+        action = self.get_human_action(action_id)
+        if action["status"] != "pending":
+            raise ProjectStorageError(f"Human action is already resolved: {action_id}")
+        if action["kind"] == "info_request" and resolution == "approved":
+            raise ProjectStorageError("Info requests must be answered or rejected.")
+        if action["kind"] == "approval_request" and resolution == "answered":
+            raise ProjectStorageError("Approval requests must be approved or rejected.")
+
+        timestamp = now_iso()
+        next_task_status = None
+        task_completed_at = None
+        if action["task_id"]:
+            if resolution in {"answered", "approved"}:
+                next_task_status = "ready"
+            else:
+                next_task_status = "failed"
+                task_completed_at = timestamp
+
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE human_actions
+                SET status=?, response_json=?, resolved_by=?, resolved_at=?
+                WHERE id=?
+                """,
+                (resolution, _json(response or {}), resolved_by, timestamp, action_id),
+            )
+            if action["task_id"] and next_task_status:
+                connection.execute(
+                    "UPDATE tasks SET status=?, ready_at=?, completed_at=?, updated_at=? WHERE id=?",
+                    (next_task_status, timestamp if next_task_status == "ready" else None, task_completed_at, timestamp, action["task_id"]),
+                )
+        self.event(
+            action["project_id"],
+            action["workitem_id"],
+            action["workflow_id"],
+            action["task_id"],
+            "human_action_resolved",
+            {"status": resolution, "response": response or {}},
+            run_id=action["run_id"],
+            human_action_id=action_id,
+        )
+        if action["task_id"] and next_task_status == "ready":
+            self.event(
+                action["project_id"],
+                action["workitem_id"],
+                action["workflow_id"],
+                action["task_id"],
+                "task_ready",
+                {"reason": "human_action_resolved"},
+                human_action_id=action_id,
+            )
+        return self.get_human_action(action_id)
 
     def list_events(self, project_id: str | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
         self.initialize()
@@ -442,14 +667,17 @@ class ProjectStorage:
         task_id: str | None,
         event_type: str,
         payload: dict[str, Any],
+        *,
+        run_id: str | None = None,
+        human_action_id: str | None = None,
     ) -> None:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO project_events(project_id, workitem_id, workflow_id, task_id, type, payload_json, created_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO project_events(project_id, workitem_id, workflow_id, task_id, run_id, human_action_id, type, payload_json, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, workitem_id, workflow_id, task_id, event_type, _json(payload), now_iso()),
+                (project_id, workitem_id, workflow_id, task_id, run_id, human_action_id, event_type, _json(payload), now_iso()),
             )
 
     def _decode_task(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -457,3 +685,11 @@ class ProjectStorage:
             output_key = key.removesuffix("_json")
             task[output_key] = json.loads(task.pop(key))
         return task
+
+    def _decode_human_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        for key in ["questions_json", "options_json", "evidence_json"]:
+            output_key = key.removesuffix("_json")
+            action[output_key] = json.loads(action.pop(key))
+        response_json = action.pop("response_json")
+        action["response"] = json.loads(response_json) if response_json else None
+        return action

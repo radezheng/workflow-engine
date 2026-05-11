@@ -498,9 +498,10 @@ hwe workitem list
 hwe workitem show <workitem-id>
 
 hwe intake "Add notes with markdown"
-hwe answer <human-action-id> --text "Use PostgreSQL"
-hwe approve <human-action-id>
-hwe reject <human-action-id> --reason "Use isolated smoke DB instead"
+hwe human-action list <project> --status pending
+hwe answer <project> <human-action-id> --text "Use PostgreSQL"
+hwe approve <project> <human-action-id>
+hwe reject <project> <human-action-id> --reason "Use isolated smoke DB instead"
 
 hwe planner run <workitem-id>
 hwe queue list

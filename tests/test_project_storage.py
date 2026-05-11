@@ -145,3 +145,85 @@ def test_prompt_template_cli_uses_hwe_template_root(tmp_path: Path, capsys, monk
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["body_md"] == "Review for correctness and regression risk."
+
+
+def test_task_waiting_for_info_creates_human_action_and_answer_resumes(tmp_path: Path) -> None:
+    project_root = tmp_path / "human-info"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("human-info")
+    workitem = storage.create_workitem(project["id"], "Clarify notes storage")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(workflow["id"], "Plan persistence", kind="design", profile="reviewer")
+
+    assert storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="reviewer") is not None
+    waiting = storage.complete_task(
+        task["id"],
+        status="waiting_for_info",
+        result={"reason": "Persistence target affects design."},
+        human_action_title="Choose persistence target",
+        human_action_body="Should notes use PostgreSQL or browser storage?",
+        questions=[{"id": "q1", "question": "Where should notes be stored?"}],
+        options=["PostgreSQL", "Local browser only"],
+        requested_by="reviewer",
+    )
+
+    assert waiting["status"] == "waiting_for_info"
+    action = waiting["human_action"]
+    assert action["kind"] == "info_request"
+    assert action["questions"] == [{"id": "q1", "question": "Where should notes be stored?"}]
+    assert storage.list_human_actions(project["id"], status="pending") == [action]
+
+    resolved = storage.resolve_human_action(action["id"], resolution="answered", response={"text": "PostgreSQL"}, resolved_by="human")
+
+    assert resolved["status"] == "answered"
+    assert resolved["response"] == {"text": "PostgreSQL"}
+    assert storage.get_task(task["id"])["status"] == "ready"
+    assert storage.claim_next_task(workflow["id"], worker_id="worker-2", profile="reviewer")["id"] == task["id"]
+
+
+def test_human_action_approval_cli_resumes_task(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "approval-project"
+    assert main(["project", "init", str(project_root), "--id", "approval-project"]) == 0
+    capsys.readouterr()
+
+    assert main(["workitem", "create", str(project_root), "Run migration", "--project-id", "approval-project"]) == 0
+    workitem = json.loads(capsys.readouterr().out)
+    assert main(["workflow", "create", str(project_root), workitem["id"], "--project-id", "approval-project"]) == 0
+    workflow = json.loads(capsys.readouterr().out)
+    assert main(["task", "create", str(project_root), workflow["id"], "Approve migration", "--kind", "approval", "--profile", "reviewer"]) == 0
+    task = json.loads(capsys.readouterr().out)
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-1", "--profile", "reviewer"]) == 0
+    capsys.readouterr()
+
+    assert main(
+        [
+            "task",
+            "complete",
+            str(project_root),
+            task["id"],
+            "--status",
+            "waiting_for_approval",
+            "--title",
+            "Approve migration",
+            "--body",
+            "Run a project-local migration.",
+            "--option",
+            "approve",
+            "--option",
+            "reject",
+            "--evidence",
+            "backend/migration.sql",
+            "--requested-by",
+            "reviewer",
+        ]
+    ) == 0
+    waiting = json.loads(capsys.readouterr().out)
+    action_id = waiting["human_action"]["id"]
+    assert waiting["status"] == "waiting_for_approval"
+
+    assert main(["approve", str(project_root), action_id, "--project-id", "approval-project", "--text", "Approved for dev DB"]) == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert approved["status"] == "approved"
+    assert main(["task", "list", str(project_root), workflow["id"]]) == 0
+    tasks = json.loads(capsys.readouterr().out)
+    assert tasks[0]["status"] == "ready"
