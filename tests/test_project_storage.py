@@ -255,6 +255,28 @@ def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
     assert storage.get_task(task["id"])["status"] == "succeeded"
 
 
+def test_task_release_cli_returns_claimed_task_to_ready(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "release-project"
+    assert main(["project", "init", str(project_root), "--id", "release-project"]) == 0
+    capsys.readouterr()
+    assert main(["workitem", "create", str(project_root), "Release claim", "--project-id", "release-project"]) == 0
+    workitem = json.loads(capsys.readouterr().out)
+    assert main(["workflow", "create", str(project_root), workitem["id"], "--project-id", "release-project"]) == 0
+    workflow = json.loads(capsys.readouterr().out)
+    assert main(["task", "create", str(project_root), workflow["id"], "Claim me", "--kind", "design", "--profile", "reviewer"]) == 0
+    task = json.loads(capsys.readouterr().out)
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-1", "--profile", "reviewer"]) == 0
+    capsys.readouterr()
+
+    assert main(["task", "release", str(project_root), task["id"], "--reason", "cancelled-run"]) == 0
+    released = json.loads(capsys.readouterr().out)
+
+    assert released["status"] == "ready"
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-2", "--profile", "reviewer"]) == 0
+    reclaimed = json.loads(capsys.readouterr().out)
+    assert reclaimed["id"] == task["id"]
+
+
 def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "agent-runtime"
     storage = ProjectStorage(project_root)

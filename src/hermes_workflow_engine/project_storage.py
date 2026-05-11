@@ -408,6 +408,24 @@ class ProjectStorage:
         self.event(claimed["project_id"], claimed["workitem_id"], workflow_id, claimed["id"], "task_claimed", {"worker_id": worker_id, "claim_id": claim_id})
         return claimed
 
+    def release_task_claim(self, task_id: str, *, reason: str = "released") -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if task["status"] != "claimed":
+            raise ProjectStorageError(f"Task is not claimed: {task_id}")
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE worker_claims SET status='released', released_at=?, release_reason=? WHERE task_id=? AND status='claimed'",
+                (timestamp, reason, task_id),
+            )
+            connection.execute(
+                "UPDATE tasks SET status='ready', ready_at=?, updated_at=? WHERE id=?",
+                (timestamp, timestamp, task_id),
+            )
+        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_claim_released", {"reason": reason})
+        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_ready", {"reason": reason})
+        return self.get_task(task_id)
+
     def create_task_run(self, task_id: str, *, claim_id: str | None = None, profile: str | None = None) -> dict[str, Any]:
         task = self.get_task(task_id)
         run_id = _id("run")

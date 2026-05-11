@@ -133,6 +133,10 @@ def main(argv: list[str] | None = None) -> int:
     task_claim.add_argument("--worker-id", required=True)
     task_claim.add_argument("--profile", default=None)
     task_claim.add_argument("--lease-seconds", type=int, default=900)
+    task_release = task_subparsers.add_parser("release", help="Release an abandoned claimed task back to ready.")
+    task_release.add_argument("project")
+    task_release.add_argument("task_id")
+    task_release.add_argument("--reason", default="released")
     task_complete = task_subparsers.add_parser("complete", help="Complete a claimed task.")
     task_complete.add_argument("project")
     task_complete.add_argument("task_id")
@@ -409,6 +413,9 @@ def _handle_task(args: argparse.Namespace) -> int:
         task = storage.claim_next_task(args.workflow_id, worker_id=args.worker_id, profile=args.profile, lease_seconds=args.lease_seconds)
         _print_json(task or {})
         return 0 if task else 1
+    if args.task_command == "release":
+        _print_json(storage.release_task_claim(args.task_id, reason=args.reason))
+        return 0
     if args.task_command == "complete":
         _print_json(
             storage.complete_task(
