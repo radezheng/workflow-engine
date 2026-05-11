@@ -9,6 +9,7 @@ from .config import ConfigError, HWEConfig, configured_config_path, load_config,
 from .runtime import WorkflowRuntime
 from .spec import SpecError, load_workflow
 from .storage import Storage
+from .v2_storage import V2Storage, V2StorageError, resolve_project_root
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,11 +40,85 @@ def main(argv: list[str] | None = None) -> int:
     config_init.add_argument("--default-workspace-root", default="~/workspaces/hermes")
     config_init.add_argument("--force", action="store_true", help="Overwrite an existing config file.")
 
+    v2_parser = subparsers.add_parser("v2", help="Manage V2 project/workitem/task state.")
+    v2_subparsers = v2_parser.add_subparsers(dest="v2_command", required=True)
+
+    v2_project = v2_subparsers.add_parser("project", help="Manage V2 projects.")
+    v2_project_subparsers = v2_project.add_subparsers(dest="project_command", required=True)
+    v2_project_init = v2_project_subparsers.add_parser("init", help="Initialize V2 state for a project.")
+    v2_project_init.add_argument("project", help="Project name under default_workspace_root or an explicit path.")
+    v2_project_init.add_argument("--id", dest="project_id", default=None)
+    v2_project_init.add_argument("--name", default=None)
+    v2_project_show = v2_project_subparsers.add_parser("show", help="Show a V2 project record.")
+    v2_project_show.add_argument("project")
+    v2_project_show.add_argument("--id", dest="project_id", default=None)
+
+    v2_workitem = v2_subparsers.add_parser("workitem", help="Manage V2 work items.")
+    v2_workitem_subparsers = v2_workitem.add_subparsers(dest="workitem_command", required=True)
+    v2_workitem_create = v2_workitem_subparsers.add_parser("create", help="Create a work item.")
+    v2_workitem_create.add_argument("project")
+    v2_workitem_create.add_argument("title")
+    v2_workitem_create.add_argument("--project-id", default=None)
+    v2_workitem_create.add_argument("--type", default="feature")
+    v2_workitem_create.add_argument("--requirements", default="")
+    v2_workitem_create.add_argument("--constraints", default="")
+    v2_workitem_create.add_argument("--acceptance", action="append", default=[])
+    v2_workitem_create.add_argument("--priority", type=int, default=100)
+    v2_workitem_create.add_argument("--risk-level", default="medium")
+    v2_workitem_list = v2_workitem_subparsers.add_parser("list", help="List work items.")
+    v2_workitem_list.add_argument("project")
+    v2_workitem_list.add_argument("--project-id", default=None)
+
+    v2_workflow = v2_subparsers.add_parser("workflow", help="Manage V2 workflows.")
+    v2_workflow_subparsers = v2_workflow.add_subparsers(dest="workflow_command", required=True)
+    v2_workflow_create = v2_workflow_subparsers.add_parser("create", help="Create a workflow for a work item.")
+    v2_workflow_create.add_argument("project")
+    v2_workflow_create.add_argument("workitem_id")
+    v2_workflow_create.add_argument("--project-id", default=None)
+    v2_workflow_create.add_argument("--planner-profile", default=None)
+
+    v2_task = v2_subparsers.add_parser("task", help="Manage V2 tasks.")
+    v2_task_subparsers = v2_task.add_subparsers(dest="task_command", required=True)
+    v2_task_create = v2_task_subparsers.add_parser("create", help="Create a task in a workflow.")
+    v2_task_create.add_argument("project")
+    v2_task_create.add_argument("workflow_id")
+    v2_task_create.add_argument("title")
+    v2_task_create.add_argument("--kind", required=True)
+    v2_task_create.add_argument("--profile", default=None)
+    v2_task_create.add_argument("--depends-on", action="append", default=[])
+    v2_task_create.add_argument("--output", action="append", default=[])
+    v2_task_create.add_argument("--gate", action="append", default=[])
+    v2_task_create.add_argument("--prompt-text", default=None)
+    v2_task_create.add_argument("--priority", type=int, default=100)
+    v2_task_create.add_argument("--risk-level", default="medium")
+    v2_task_create.add_argument("--created-by", default=None)
+    v2_task_create.add_argument("--created-reason", default=None)
+    v2_task_list = v2_task_subparsers.add_parser("list", help="List tasks in a workflow.")
+    v2_task_list.add_argument("project")
+    v2_task_list.add_argument("workflow_id")
+    v2_task_claim = v2_task_subparsers.add_parser("claim", help="Claim the next ready task.")
+    v2_task_claim.add_argument("project")
+    v2_task_claim.add_argument("workflow_id")
+    v2_task_claim.add_argument("--worker-id", required=True)
+    v2_task_claim.add_argument("--profile", default=None)
+    v2_task_claim.add_argument("--lease-seconds", type=int, default=900)
+    v2_task_complete = v2_task_subparsers.add_parser("complete", help="Complete a claimed task.")
+    v2_task_complete.add_argument("project")
+    v2_task_complete.add_argument("task_id")
+    v2_task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"])
+
+    v2_events = v2_subparsers.add_parser("events", help="Show V2 project events as JSON lines.")
+    v2_events.add_argument("project")
+    v2_events.add_argument("--project-id", default=None)
+    v2_events.add_argument("--limit", type=int, default=50)
+
     args = parser.parse_args(argv)
 
     try:
         if args.command == "config":
             return _handle_config(args)
+        if args.command == "v2":
+            return _handle_v2(args)
 
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
@@ -83,6 +158,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+    except V2StorageError as exc:
+        print(f"v2 error: {exc}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("canceled", file=sys.stderr)
         return 130
@@ -118,6 +196,119 @@ def _handle_config(args: argparse.Namespace) -> int:
         print(f"created HWE config: {path}")
         return 0
     return 2
+
+
+def _handle_v2(args: argparse.Namespace) -> int:
+    if args.v2_command == "project":
+        return _handle_v2_project(args)
+    if args.v2_command == "workitem":
+        return _handle_v2_workitem(args)
+    if args.v2_command == "workflow":
+        return _handle_v2_workflow(args)
+    if args.v2_command == "task":
+        return _handle_v2_task(args)
+    if args.v2_command == "events":
+        storage = _v2_storage(args.project)
+        project_id = args.project_id or Path(args.project).expanduser().name
+        for event in storage.list_events(project_id, limit=args.limit):
+            print(json.dumps(event, sort_keys=True))
+        return 0
+    return 2
+
+
+def _handle_v2_project(args: argparse.Namespace) -> int:
+    storage = _v2_storage(args.project)
+    project_id = args.project_id or Path(args.project).expanduser().name
+    if args.project_command == "init":
+        name = args.name or project_id
+        _print_json(storage.upsert_project(name, project_id=project_id))
+        return 0
+    if args.project_command == "show":
+        _print_json(storage.get_project(project_id))
+        return 0
+    return 2
+
+
+def _handle_v2_workitem(args: argparse.Namespace) -> int:
+    storage = _v2_storage(args.project)
+    project_id = args.project_id or Path(args.project).expanduser().name
+    if args.workitem_command == "create":
+        _ensure_project(storage, project_id)
+        _print_json(
+            storage.create_workitem(
+                project_id,
+                args.title,
+                workitem_type=args.type,
+                requirements=args.requirements,
+                constraints=args.constraints,
+                acceptance=args.acceptance,
+                priority=args.priority,
+                risk_level=args.risk_level,
+            )
+        )
+        return 0
+    if args.workitem_command == "list":
+        _print_json(storage.list_workitems(project_id))
+        return 0
+    return 2
+
+
+def _handle_v2_workflow(args: argparse.Namespace) -> int:
+    storage = _v2_storage(args.project)
+    project_id = args.project_id or Path(args.project).expanduser().name
+    if args.workflow_command == "create":
+        _print_json(storage.create_workflow(project_id, args.workitem_id, planner_profile=args.planner_profile))
+        return 0
+    return 2
+
+
+def _handle_v2_task(args: argparse.Namespace) -> int:
+    storage = _v2_storage(args.project)
+    if args.task_command == "create":
+        _print_json(
+            storage.create_task(
+                args.workflow_id,
+                args.title,
+                kind=args.kind,
+                profile=args.profile,
+                depends_on=args.depends_on,
+                outputs=args.output,
+                gates=args.gate,
+                prompt_text=args.prompt_text,
+                priority=args.priority,
+                risk_level=args.risk_level,
+                created_by=args.created_by,
+                created_reason=args.created_reason,
+            )
+        )
+        return 0
+    if args.task_command == "list":
+        _print_json(storage.list_tasks(args.workflow_id))
+        return 0
+    if args.task_command == "claim":
+        task = storage.claim_next_task(args.workflow_id, worker_id=args.worker_id, profile=args.profile, lease_seconds=args.lease_seconds)
+        _print_json(task or {})
+        return 0 if task else 1
+    if args.task_command == "complete":
+        _print_json(storage.complete_task(args.task_id, status=args.status))
+        return 0
+    return 2
+
+
+def _v2_storage(project: str) -> V2Storage:
+    resolved_root = resolve_project_root(project)
+    return V2Storage(resolved_root)
+
+
+def _ensure_project(storage: V2Storage, project_id: str) -> None:
+    try:
+        storage.get_project(project_id)
+    except V2StorageError:
+        storage.upsert_project(project_id, project_id=project_id)
+
+
+def _print_json(payload: object) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def project_root() -> Path:

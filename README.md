@@ -133,6 +133,29 @@ hwe status workflow.yaml
 hwe events workflow.yaml [--limit N]
 ```
 
+## V2 Project/WorkItem/Task Queue
+
+V2 stores state in each project's `.engine/engine.db` and starts with project, work item, workflow, and task queue records. This is the persistence layer for the future planner and worker loop.
+
+```bash
+hwe v2 project init my-project --id my-project
+
+WORKITEM_ID=$(hwe v2 workitem create my-project "Add notes" \
+  --requirements "Support Markdown notes" \
+  --acceptance "Create, edit, delete, and view notes" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+WORKFLOW_ID=$(hwe v2 workflow create my-project "$WORKITEM_ID" \
+  --planner-profile reviewer \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+hwe v2 task create my-project "$WORKFLOW_ID" "Design notes" --kind design --profile reviewer
+hwe v2 task list my-project "$WORKFLOW_ID"
+hwe v2 task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile reviewer
+```
+
+When a task is completed with `hwe v2 task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
+
 ## Current Validator Names
 
 - `git_initialized`
