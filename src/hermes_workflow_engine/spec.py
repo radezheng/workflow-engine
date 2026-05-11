@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from .config import HWEConfig, load_config
+
 
 class SpecError(ValueError):
     """Raised when a workflow spec is invalid."""
@@ -59,7 +61,7 @@ class WorkflowSpec:
         return self.workspace / ".engine"
 
 
-def load_workflow(path: str | Path) -> WorkflowSpec:
+def load_workflow(path: str | Path, config: HWEConfig | None = None) -> WorkflowSpec:
     spec_path = Path(path).expanduser().resolve()
     if not spec_path.exists():
         raise SpecError(f"Workflow spec does not exist: {spec_path}")
@@ -74,7 +76,8 @@ def load_workflow(path: str | Path) -> WorkflowSpec:
 
     workflow_id = _required_string(workflow, "id", "workflow.id")
     version = str(workflow.get("version", "0.1.0"))
-    workspace_value = _required_string(workflow, "workspace", "workflow.workspace")
+    config = load_config() if config is None else config
+    workspace_value = _workflow_workspace(workflow, config)
     workspace_root = Path(workspace_value).expanduser()
     if not workspace_root.is_absolute():
         workspace_root = (spec_path.parent / workspace_root).resolve()
@@ -167,6 +170,17 @@ def _required_string(mapping: dict[str, Any], key: str, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SpecError(f"Missing required string `{label}`.")
     return value.strip()
+
+
+def _workflow_workspace(workflow: dict[str, Any], config: HWEConfig) -> str:
+    value = workflow.get("workspace")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if value is not None:
+        raise SpecError("`workflow.workspace` must be a non-empty string when provided.")
+    if config.default_workspace_root is not None:
+        return str(config.default_workspace_root)
+    raise SpecError("Missing required string `workflow.workspace` and no HWE config `default_workspace_root` is set.")
 
 
 def _resolve_project_workspace(workspace_root: Path, project: str | None) -> Path:

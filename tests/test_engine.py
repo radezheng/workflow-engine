@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from hermes_workflow_engine.config import HWEConfig
 from hermes_workflow_engine.runtime import WorkflowRuntime
 from hermes_workflow_engine.spec import load_workflow
 from hermes_workflow_engine.storage import Storage
@@ -83,6 +84,21 @@ def test_project_folder_gets_own_engine_state(tmp_path: Path) -> None:
     assert (project_workspace / "src" / "alpha.py").exists()
     assert (project_workspace / ".engine" / "engine.db").exists()
     assert not (workspace_root / ".engine").exists()
+
+
+def test_config_default_workspace_root_is_used_when_spec_omits_workspace(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "configured-workspace"
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow = {
+        "workflow": {"id": "configured-flow", "project": "alpha"},
+        "steps": [{"id": "init", "kind": "command", "commands": ["true"]}],
+    }
+    workflow_path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+
+    spec = load_workflow(workflow_path, config=HWEConfig(default_workspace_root=workspace_root))
+
+    assert spec.workspace_root == workspace_root
+    assert spec.workspace == workspace_root / "alpha"
 
 
 def test_hermes_profile_command_uses_current_cli_shape(tmp_path: Path) -> None:

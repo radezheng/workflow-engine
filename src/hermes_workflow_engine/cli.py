@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .config import ConfigError, HWEConfig, configured_config_path, load_config, write_config
 from .runtime import WorkflowRuntime
 from .spec import SpecError, load_workflow
 from .storage import Storage
@@ -30,9 +31,20 @@ def main(argv: list[str] | None = None) -> int:
     events_parser.add_argument("workflow")
     events_parser.add_argument("--limit", type=int, default=50)
 
+    config_parser = subparsers.add_parser("config", help="Manage HWE local configuration.")
+    config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
+    config_subparsers.add_parser("path", help="Print the active HWE config path.")
+    config_subparsers.add_parser("show", help="Print the active HWE config as JSON.")
+    config_init = config_subparsers.add_parser("init", help="Create an HWE config file.")
+    config_init.add_argument("--default-workspace-root", default="~/workspaces/hermes")
+    config_init.add_argument("--force", action="store_true", help="Overwrite an existing config file.")
+
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "config":
+            return _handle_config(args)
+
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
         if args.command == "validate":
@@ -68,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     except SpecError as exc:
         print(f"spec error: {exc}", file=sys.stderr)
         return 2
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("canceled", file=sys.stderr)
         return 130
@@ -82,6 +97,27 @@ def _print_status(storage: Storage, workflow_id: str) -> None:
     for row in rows:
         profile = row["profile"] or ""
         print(f"{row['id']:<{width}}  {row['state']:<18} attempt={row['attempt']} kind={row['kind']} profile={profile}")
+
+
+def _handle_config(args: argparse.Namespace) -> int:
+    if args.config_command == "path":
+        print(configured_config_path())
+        return 0
+    if args.config_command == "show":
+        config = load_config()
+        payload = {
+            "path": str(config.source_path) if config.source_path else None,
+            "exists": bool(config.source_path and config.source_path.exists()),
+            "default_workspace_root": str(config.default_workspace_root) if config.default_workspace_root else None,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if args.config_command == "init":
+        config = HWEConfig(default_workspace_root=Path(args.default_workspace_root).expanduser())
+        path = write_config(config, force=args.force)
+        print(f"created HWE config: {path}")
+        return 0
+    return 2
 
 
 def project_root() -> Path:

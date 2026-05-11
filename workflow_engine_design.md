@@ -43,7 +43,7 @@ A workflow is a project-level state machine backed by a step graph.
 workflow:
   id: economic-cycle-dashboard
   version: 0.1.0
-  workspace: /Users/rade/workspace/hermes/economic-cycle-dashboard
+  workspace: /path/to/hermes-workspace
   concurrency:
     default: 2
     locks:
@@ -214,7 +214,7 @@ locks:
   - repo
   - database
   - path:scripts/fetch_indicators.py
-  - service:hindsight-db:read_only
+  - service:external-postgres:read_only
 ```
 
 Rules:
@@ -434,7 +434,8 @@ Filesystem layout:
 ```yaml
 workflow:
   id: hermes-agent-project
-  workspace: /Users/rade/workspace/hermes/example-project
+  workspace: /path/to/hermes-workspace
+  project: example-project
   concurrency:
     default: 2
     locks:
@@ -444,25 +445,22 @@ workflow:
 profiles:
   default:
     hermes_profile: default
-    model: gemma-4-31b-it-mlx@6bit
-    switch_command: /Users/rade/loadgemma4.sh
+    hermes_command: hermes
     healthcheck:
-      url: http://127.0.0.1:1234/v1/chat/completions
-      model: gemma-4-31b-it-mlx@6bit
+      url: http://localhost:1234/v1/chat/completions
+      model: planner-model
   coder:
     hermes_profile: coder
-    model: qwen/qwen3-coder-next
-    switch_command: /Users/rade/loadcoder.sh
+    hermes_command: hermes
     healthcheck:
-      url: http://127.0.0.1:1234/v1/chat/completions
-      model: qwen/qwen3-coder-next
+      url: http://localhost:1234/v1/chat/completions
+      model: coder-model
   reviewer:
     hermes_profile: reviewer
-    model: gemma-4-31b-it-mlx@6bit
-    switch_command: /Users/rade/loadgemma4.sh
+    hermes_command: hermes
     healthcheck:
-      url: http://127.0.0.1:1234/v1/chat/completions
-      model: gemma-4-31b-it-mlx@6bit
+      url: http://localhost:1234/v1/chat/completions
+      model: reviewer-model
 
 context_profiles:
   planning:

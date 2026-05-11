@@ -44,16 +44,42 @@ Runtime files are written to the example project's `.engine/` directory.
 
 ## Workspace And Project Layout
 
-For multiple projects, use `workflow.workspace` as the shared workspace root and `workflow.project` as the project folder under it. For local Hermes dogfood and generated projects, use `~/workspaces/hermes` as the shared root so target projects live outside this engine repository:
+For multiple projects, use `workflow.workspace` as the shared workspace root and `workflow.project` as the project folder under it:
 
 ```yaml
 workflow:
   id: my-project-flow
-  workspace: /Users/rade/workspaces/hermes
+  workspace: /path/to/hermes-workspace
   project: my-project
 ```
 
-All commands, Hermes profile invocations, output paths, validators, artifacts, and state then use `/Users/rade/workspaces/hermes/my-project` as the project workspace. That project gets its own `.engine/` directory, so progress is tracked independently per project. If `workflow.project` is omitted, the old single-project behavior is preserved and `workflow.workspace` itself is treated as the project workspace.
+All commands, Hermes profile invocations, output paths, validators, artifacts, and state then use `/path/to/hermes-workspace/my-project` as the project workspace. That project gets its own `.engine/` directory, so progress is tracked independently per project. If `workflow.project` is omitted, the old single-project behavior is preserved and `workflow.workspace` itself is treated as the project workspace.
+
+## HWE Local Config
+
+Machine-specific defaults belong in HWE config, not in skills or workflow templates. The default config path is `~/.config/hermes-workflow-engine/config.yaml`; set `HWE_CONFIG` to use another file.
+
+Create or inspect the local config with:
+
+```bash
+hwe config init --default-workspace-root ~/workspaces/hermes
+hwe config show
+hwe config path
+```
+
+When a workflow omits `workflow.workspace`, HWE uses `default_workspace_root` from this config:
+
+```yaml
+default_workspace_root: ~/workspaces/hermes
+```
+
+Then a workflow can specify only the project name:
+
+```yaml
+workflow:
+  id: my-project-flow
+  project: my-project
+```
 
 ## Running A Real Hermes Profile Step
 
@@ -91,10 +117,11 @@ profiles:
     # Optional. Defaults to the profile alias when it exists, then HERMES_BIN/hermes.
     hermes_command: coder
     hermes_args: [--accept-hooks]
-    switch_command: /Users/rade/loadcoder.sh
+    # Optional. Prefer values generated from Hermes CLI/API or profile metadata.
+    switch_command: ./scripts/use-coder-profile.sh
     healthcheck:
-      url: http://127.0.0.1:1234/v1/chat/completions
-      model: qwen/qwen3-coder-next
+      url: http://localhost:1234/v1/chat/completions
+      model: coder-model
 ```
 
 ## CLI
