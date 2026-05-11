@@ -505,11 +505,11 @@ hwe reject <project> <human-action-id> --reason "Use isolated smoke DB instead"
 
 hwe planner run <workitem-id>
 hwe queue list
+hwe run-workitem <project> <workitem-id> --dry-run --max-tasks 1
 hwe worker run --profile coder
-hwe run-workitem <workitem-id>
 ```
 
-MVP can implement push-style execution first, where `hwe run-workitem` dispatches ready tasks itself. The schema should still support pull-style worker claims for future daemon workers.
+The first runnable path is push-style execution: `hwe run-workitem` claims ready tasks, records task runs, writes prompts/logs, and completes or fails tasks through the project queue. The schema still supports pull-style worker claims for future daemon workers.
 
 ## 10. UI Sketch
 
@@ -565,8 +565,8 @@ The schema includes tables for:
 
 - Add `Task`, dependencies, locks, and worker claims.
 - Convert static workflow steps into queued tasks.
+- Add `run-workitem` push-style execution for ready tasks.
 - Add lease timeout and stale task recovery.
-- Keep current serial execution as the first scheduler implementation.
 
 ### Phase 3: Human Actions
 
@@ -586,6 +586,8 @@ The schema includes tables for:
 - Add start and completion checkpoint tags.
 - Add final report generation and close workflow.
 - Add recovery commands for retry, pause, resume, and revert guidance.
+
+API and UI should be built after the CLI runner is stable, using the same project storage and runtime surfaces rather than introducing a separate execution path.
 
 ## 13. Open Questions
 

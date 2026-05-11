@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .config import ConfigError, HWEConfig, configured_config_path, load_config, write_config
+from .project_runtime import ProjectRuntime
 from .runtime import WorkflowRuntime
 from .spec import SpecError, load_workflow
 from .storage import Storage
@@ -31,6 +32,15 @@ def main(argv: list[str] | None = None) -> int:
     events_parser = subparsers.add_parser("events", help="Show recent workflow events as JSON lines.")
     events_parser.add_argument("workflow")
     events_parser.add_argument("--limit", type=int, default=50)
+
+    run_workitem_parser = subparsers.add_parser("run-workitem", help="Run ready tasks for a project work item.")
+    run_workitem_parser.add_argument("project")
+    run_workitem_parser.add_argument("workitem_id")
+    run_workitem_parser.add_argument("--project-id", default=None)
+    run_workitem_parser.add_argument("--worker-id", default="hwe-runner")
+    run_workitem_parser.add_argument("--profile", default=None)
+    run_workitem_parser.add_argument("--max-tasks", type=int, default=None)
+    run_workitem_parser.add_argument("--dry-run", action="store_true")
 
     config_parser = subparsers.add_parser("config", help="Manage HWE local configuration.")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
@@ -204,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_task(args)
         if args.command in {"human-action", "answer", "approve", "reject"}:
             return _handle_human_action(args)
+        if args.command == "run-workitem":
+            return _handle_run_workitem(args)
 
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
@@ -413,6 +425,21 @@ def _handle_task(args: argparse.Namespace) -> int:
         )
         return 0
     return 2
+
+
+def _handle_run_workitem(args: argparse.Namespace) -> int:
+    storage = _project_storage(args.project)
+    project_id = args.project_id or Path(args.project).expanduser().name
+    runtime = ProjectRuntime(storage, dry_run=args.dry_run)
+    summary = runtime.run_workitem(
+        project_id,
+        args.workitem_id,
+        worker_id=args.worker_id,
+        profile=args.profile,
+        max_tasks=args.max_tasks,
+    )
+    _print_json(summary.__dict__)
+    return 1 if summary.tasks_failed else 0
 
 
 def _handle_human_action(args: argparse.Namespace) -> int:

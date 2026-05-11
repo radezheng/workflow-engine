@@ -244,6 +244,15 @@ class ProjectStorage:
             raise ProjectStorageError(f"Unknown workflow: {workflow_id}")
         return dict(row)
 
+    def current_workflow_for_workitem(self, project_id: str, workitem_id: str) -> dict[str, Any]:
+        workitem = self.get_workitem(workitem_id)
+        if workitem["project_id"] != project_id:
+            raise ProjectStorageError("Workitem does not belong to project.")
+        workflow_id = workitem["current_workflow_id"]
+        if not workflow_id:
+            raise ProjectStorageError(f"Workitem has no workflow: {workitem_id}")
+        return self.get_workflow(workflow_id)
+
     def create_task(
         self,
         workflow_id: str,
@@ -398,6 +407,73 @@ class ProjectStorage:
         claimed["claim_id"] = claim_id
         self.event(claimed["project_id"], claimed["workitem_id"], workflow_id, claimed["id"], "task_claimed", {"worker_id": worker_id, "claim_id": claim_id})
         return claimed
+
+    def create_task_run(self, task_id: str, *, claim_id: str | None = None, profile: str | None = None) -> dict[str, Any]:
+        task = self.get_task(task_id)
+        run_id = _id("run")
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO task_runs(id, task_id, workflow_id, workitem_id, claim_id, attempt, profile, status, started_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'started', ?)
+                """,
+                (run_id, task_id, task["workflow_id"], task["workitem_id"], claim_id, task["attempt"], profile or task["profile"], timestamp),
+            )
+        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_run_started", {"run_id": run_id, "attempt": task["attempt"]}, run_id=run_id)
+        return self.get_task_run(run_id)
+
+    def finish_task_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        exit_code: int | None = None,
+        result: dict[str, Any] | None = None,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+        prompt_path: Path | None = None,
+    ) -> dict[str, Any]:
+        run = self.get_task_run(run_id)
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status=?, ended_at=?, exit_code=?, result_json=?, stdout_path=?, stderr_path=?, prompt_path=?
+                WHERE id=?
+                """,
+                (
+                    status,
+                    timestamp,
+                    exit_code,
+                    _json(result or {}),
+                    str(stdout_path) if stdout_path else None,
+                    str(stderr_path) if stderr_path else None,
+                    str(prompt_path) if prompt_path else None,
+                    run_id,
+                ),
+            )
+        self.event(run["project_id"], run["workitem_id"], run["workflow_id"], run["task_id"], "task_run_finished", {"run_id": run_id, "status": status, "exit_code": exit_code}, run_id=run_id)
+        return self.get_task_run(run_id)
+
+    def get_task_run(self, run_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT task_runs.*, project_workflows.project_id
+                FROM task_runs
+                JOIN project_workflows ON project_workflows.id = task_runs.workflow_id
+                WHERE task_runs.id=?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise ProjectStorageError(f"Unknown task run: {run_id}")
+        run = dict(row)
+        run["result"] = json.loads(run.pop("result_json"))
+        return run
 
     def complete_task(
         self,

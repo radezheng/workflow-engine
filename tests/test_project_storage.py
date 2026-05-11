@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from hermes_workflow_engine.cli import main
+from hermes_workflow_engine.project_runtime import ProjectRuntime
 from hermes_workflow_engine.project_storage import ProjectStorage
 
 
@@ -227,3 +228,59 @@ def test_human_action_approval_cli_resumes_task(tmp_path: Path, capsys) -> None:
     assert main(["task", "list", str(project_root), workflow["id"]]) == 0
     tasks = json.loads(capsys.readouterr().out)
     assert tasks[0]["status"] == "ready"
+
+
+def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
+    project_root = tmp_path / "runtime-project"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("runtime-project")
+    workitem = storage.create_workitem(project["id"], "Create marker", requirements="Write a marker file.")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Write marker",
+        kind="command",
+        profile="command",
+        prompt_text="python3 -c \"from pathlib import Path; Path('marker.txt').write_text('ok', encoding='utf-8')\"",
+        outputs=["marker.txt"],
+    )
+
+    summary = ProjectRuntime(storage).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert summary.blocked == []
+    assert (project_root / "marker.txt").read_text(encoding="utf-8") == "ok"
+    assert storage.get_task(task["id"])["status"] == "succeeded"
+
+
+def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "agent-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("agent-runtime")
+    workitem = storage.create_workitem(project["id"], "Design notes", requirements="Support Markdown notes.", constraints="Keep existing behavior.")
+    template = storage.create_role_prompt_template(project["id"], "reviewer", "design-review", "Review design scope carefully.")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Draft design",
+        kind="design",
+        profile="reviewer",
+        prompt_template_id=template["id"],
+        prompt_text="Produce docs/design.md.",
+        skills=["hermes-project-workflow"],
+        outputs=["docs/design.md"],
+    )
+
+    assert main(["run-workitem", str(project_root), workitem["id"], "--project-id", project["id"], "--dry-run"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["tasks_started"] == 1
+    assert summary["tasks_succeeded"] == 1
+    assert storage.get_task(task["id"])["status"] == "succeeded"
+    run_started = [event for event in storage.list_events(project["id"]) if event["type"] == "task_run_started"][-1]
+    prompt = project_root / ".engine" / "runs" / run_started["payload"]["run_id"] / "prompt.md"
+    prompt_text = prompt.read_text(encoding="utf-8")
+    assert "Review design scope carefully." in prompt_text
+    assert "Support Markdown notes." in prompt_text
+    assert "hermes-project-workflow" in prompt_text

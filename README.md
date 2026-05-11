@@ -157,6 +157,14 @@ hwe task list my-project "$WORKFLOW_ID"
 hwe task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile reviewer
 ```
 
+To run the ready task queue directly from the CLI, use `run-workitem`. This is the push-style runner that API and UI layers can build on later:
+
+```bash
+hwe run-workitem my-project "$WORKITEM_ID" --dry-run --max-tasks 1
+```
+
+For `kind=command` tasks, `--prompt-text` is treated as the shell command and runs from the project root. For agent tasks, HWE combines the role prompt template, task prompt, work item context, declared skills, outputs, and gates into `.engine/runs/<run-id>/prompt.md`, then invokes the task profile through Hermes. `--dry-run` writes prompts and logs without invoking Hermes or running shell commands.
+
 When a task is completed with `hwe task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
 
 Tasks can also pause for human input or approval. Completing a task with `waiting_for_info` or `waiting_for_approval` creates a pending human action and releases the worker claim:
