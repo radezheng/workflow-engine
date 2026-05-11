@@ -138,33 +138,33 @@ hwe events workflow.yaml [--limit N]
 Project workflow mode stores state in each project's `.engine/engine.db` and starts with project, work item, workflow, and task queue records. This is the persistence layer for the future planner and worker loop.
 
 ```bash
-hwe v2 project init my-project --id my-project
+hwe project init my-project --id my-project
 
-WORKITEM_ID=$(hwe v2 workitem create my-project "Add notes" \
+WORKITEM_ID=$(hwe workitem create my-project "Add notes" \
   --requirements "Support Markdown notes" \
   --acceptance "Create, edit, delete, and view notes" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-WORKFLOW_ID=$(hwe v2 workflow create my-project "$WORKITEM_ID" \
+WORKFLOW_ID=$(hwe workflow create my-project "$WORKITEM_ID" \
   --planner-profile reviewer \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-hwe v2 task create my-project "$WORKFLOW_ID" "Design notes" --kind design --profile reviewer
-hwe v2 task list my-project "$WORKFLOW_ID"
-hwe v2 task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile reviewer
+hwe task create my-project "$WORKFLOW_ID" "Design notes" --kind design --profile reviewer
+hwe task list my-project "$WORKFLOW_ID"
+hwe task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile reviewer
 ```
 
-When a task is completed with `hwe v2 task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
+When a task is completed with `hwe task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
 
 Role prompt templates let a project accumulate reusable planner, reviewer, QA, or coder instructions. Tasks can reference a template and declare the skills they expect:
 
 ```bash
-TEMPLATE_ID=$(hwe v2 prompt-template create my-project reviewer implementation-review \
+TEMPLATE_ID=$(hwe prompt-template create my-project reviewer implementation-review \
   --body "Check correctness, tests, security, regressions, and acceptance evidence." \
   --tag review --tag best-practices \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-hwe v2 task create my-project "$WORKFLOW_ID" "Review implementation" \
+hwe task create my-project "$WORKFLOW_ID" "Review implementation" \
   --kind review \
   --profile reviewer \
   --prompt-template-id "$TEMPLATE_ID" \

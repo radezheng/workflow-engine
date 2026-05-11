@@ -78,7 +78,7 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
 def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "cli-project"
 
-    exit_code = main(["v2", "project", "init", str(project_root), "--id", "cli", "--name", "CLI Project"])
+    exit_code = main(["project", "init", str(project_root), "--id", "cli", "--name", "CLI Project"])
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -90,12 +90,11 @@ def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> Non
 
 def test_prompt_template_cli_creates_template(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "template-project"
-    assert main(["v2", "project", "init", str(project_root), "--id", "template-project"]) == 0
+    assert main(["project", "init", str(project_root), "--id", "template-project"]) == 0
     capsys.readouterr()
 
     exit_code = main(
         [
-            "v2",
             "prompt-template",
             "create",
             str(project_root),

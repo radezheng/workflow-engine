@@ -40,104 +40,108 @@ def main(argv: list[str] | None = None) -> int:
     config_init.add_argument("--default-workspace-root", default="~/workspaces/hermes")
     config_init.add_argument("--force", action="store_true", help="Overwrite an existing config file.")
 
-    v2_parser = subparsers.add_parser("v2", help="Manage project/workitem/task state.")
-    v2_subparsers = v2_parser.add_subparsers(dest="v2_command", required=True)
+    project_parser = subparsers.add_parser("project", help="Manage projects.")
+    project_subparsers = project_parser.add_subparsers(dest="project_command", required=True)
+    project_init = project_subparsers.add_parser("init", help="Initialize state for a project.")
+    project_init.add_argument("project", help="Project name under default_workspace_root or an explicit path.")
+    project_init.add_argument("--id", dest="project_id", default=None)
+    project_init.add_argument("--name", default=None)
+    project_show = project_subparsers.add_parser("show", help="Show a project record.")
+    project_show.add_argument("project")
+    project_show.add_argument("--id", dest="project_id", default=None)
+    project_events = project_subparsers.add_parser("events", help="Show project events as JSON lines.")
+    project_events.add_argument("project")
+    project_events.add_argument("--id", dest="project_id", default=None)
+    project_events.add_argument("--limit", type=int, default=50)
 
-    v2_project = v2_subparsers.add_parser("project", help="Manage projects.")
-    v2_project_subparsers = v2_project.add_subparsers(dest="project_command", required=True)
-    v2_project_init = v2_project_subparsers.add_parser("init", help="Initialize state for a project.")
-    v2_project_init.add_argument("project", help="Project name under default_workspace_root or an explicit path.")
-    v2_project_init.add_argument("--id", dest="project_id", default=None)
-    v2_project_init.add_argument("--name", default=None)
-    v2_project_show = v2_project_subparsers.add_parser("show", help="Show a project record.")
-    v2_project_show.add_argument("project")
-    v2_project_show.add_argument("--id", dest="project_id", default=None)
+    workitem_parser = subparsers.add_parser("workitem", help="Manage work items.")
+    workitem_subparsers = workitem_parser.add_subparsers(dest="workitem_command", required=True)
+    workitem_create = workitem_subparsers.add_parser("create", help="Create a work item.")
+    workitem_create.add_argument("project")
+    workitem_create.add_argument("title")
+    workitem_create.add_argument("--project-id", default=None)
+    workitem_create.add_argument("--type", default="feature")
+    workitem_create.add_argument("--requirements", default="")
+    workitem_create.add_argument("--constraints", default="")
+    workitem_create.add_argument("--acceptance", action="append", default=[])
+    workitem_create.add_argument("--priority", type=int, default=100)
+    workitem_create.add_argument("--risk-level", default="medium")
+    workitem_list = workitem_subparsers.add_parser("list", help="List work items.")
+    workitem_list.add_argument("project")
+    workitem_list.add_argument("--project-id", default=None)
 
-    v2_workitem = v2_subparsers.add_parser("workitem", help="Manage work items.")
-    v2_workitem_subparsers = v2_workitem.add_subparsers(dest="workitem_command", required=True)
-    v2_workitem_create = v2_workitem_subparsers.add_parser("create", help="Create a work item.")
-    v2_workitem_create.add_argument("project")
-    v2_workitem_create.add_argument("title")
-    v2_workitem_create.add_argument("--project-id", default=None)
-    v2_workitem_create.add_argument("--type", default="feature")
-    v2_workitem_create.add_argument("--requirements", default="")
-    v2_workitem_create.add_argument("--constraints", default="")
-    v2_workitem_create.add_argument("--acceptance", action="append", default=[])
-    v2_workitem_create.add_argument("--priority", type=int, default=100)
-    v2_workitem_create.add_argument("--risk-level", default="medium")
-    v2_workitem_list = v2_workitem_subparsers.add_parser("list", help="List work items.")
-    v2_workitem_list.add_argument("project")
-    v2_workitem_list.add_argument("--project-id", default=None)
+    prompt_template_parser = subparsers.add_parser("prompt-template", help="Manage role prompt templates.")
+    prompt_template_subparsers = prompt_template_parser.add_subparsers(dest="prompt_template_command", required=True)
+    prompt_template_create = prompt_template_subparsers.add_parser("create", help="Create a role prompt template.")
+    prompt_template_create.add_argument("project")
+    prompt_template_create.add_argument("role")
+    prompt_template_create.add_argument("name")
+    prompt_template_create.add_argument("--project-id", default=None)
+    prompt_template_create.add_argument("--version", default="0.1.0")
+    prompt_template_create.add_argument("--description", default="")
+    prompt_template_create.add_argument("--body", default=None)
+    prompt_template_create.add_argument("--body-file", default=None)
+    prompt_template_create.add_argument("--tag", action="append", default=[])
+    prompt_template_list = prompt_template_subparsers.add_parser("list", help="List role prompt templates.")
+    prompt_template_list.add_argument("project")
+    prompt_template_list.add_argument("--project-id", default=None)
+    prompt_template_list.add_argument("--role", default=None)
 
-    v2_prompt_template = v2_subparsers.add_parser("prompt-template", help="Manage role prompt templates.")
-    v2_prompt_template_subparsers = v2_prompt_template.add_subparsers(dest="prompt_template_command", required=True)
-    v2_prompt_template_create = v2_prompt_template_subparsers.add_parser("create", help="Create a role prompt template.")
-    v2_prompt_template_create.add_argument("project")
-    v2_prompt_template_create.add_argument("role")
-    v2_prompt_template_create.add_argument("name")
-    v2_prompt_template_create.add_argument("--project-id", default=None)
-    v2_prompt_template_create.add_argument("--version", default="0.1.0")
-    v2_prompt_template_create.add_argument("--description", default="")
-    v2_prompt_template_create.add_argument("--body", default=None)
-    v2_prompt_template_create.add_argument("--body-file", default=None)
-    v2_prompt_template_create.add_argument("--tag", action="append", default=[])
-    v2_prompt_template_list = v2_prompt_template_subparsers.add_parser("list", help="List role prompt templates.")
-    v2_prompt_template_list.add_argument("project")
-    v2_prompt_template_list.add_argument("--project-id", default=None)
-    v2_prompt_template_list.add_argument("--role", default=None)
+    workflow_parser = subparsers.add_parser("workflow", help="Manage workflows.")
+    workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
+    workflow_create = workflow_subparsers.add_parser("create", help="Create a workflow for a work item.")
+    workflow_create.add_argument("project")
+    workflow_create.add_argument("workitem_id")
+    workflow_create.add_argument("--project-id", default=None)
+    workflow_create.add_argument("--planner-profile", default=None)
 
-    v2_workflow = v2_subparsers.add_parser("workflow", help="Manage workflows.")
-    v2_workflow_subparsers = v2_workflow.add_subparsers(dest="workflow_command", required=True)
-    v2_workflow_create = v2_workflow_subparsers.add_parser("create", help="Create a workflow for a work item.")
-    v2_workflow_create.add_argument("project")
-    v2_workflow_create.add_argument("workitem_id")
-    v2_workflow_create.add_argument("--project-id", default=None)
-    v2_workflow_create.add_argument("--planner-profile", default=None)
-
-    v2_task = v2_subparsers.add_parser("task", help="Manage tasks.")
-    v2_task_subparsers = v2_task.add_subparsers(dest="task_command", required=True)
-    v2_task_create = v2_task_subparsers.add_parser("create", help="Create a task in a workflow.")
-    v2_task_create.add_argument("project")
-    v2_task_create.add_argument("workflow_id")
-    v2_task_create.add_argument("title")
-    v2_task_create.add_argument("--kind", required=True)
-    v2_task_create.add_argument("--profile", default=None)
-    v2_task_create.add_argument("--depends-on", action="append", default=[])
-    v2_task_create.add_argument("--skill", action="append", default=[])
-    v2_task_create.add_argument("--prompt-template-id", default=None)
-    v2_task_create.add_argument("--output", action="append", default=[])
-    v2_task_create.add_argument("--gate", action="append", default=[])
-    v2_task_create.add_argument("--prompt-text", default=None)
-    v2_task_create.add_argument("--priority", type=int, default=100)
-    v2_task_create.add_argument("--risk-level", default="medium")
-    v2_task_create.add_argument("--created-by", default=None)
-    v2_task_create.add_argument("--created-reason", default=None)
-    v2_task_list = v2_task_subparsers.add_parser("list", help="List tasks in a workflow.")
-    v2_task_list.add_argument("project")
-    v2_task_list.add_argument("workflow_id")
-    v2_task_claim = v2_task_subparsers.add_parser("claim", help="Claim the next ready task.")
-    v2_task_claim.add_argument("project")
-    v2_task_claim.add_argument("workflow_id")
-    v2_task_claim.add_argument("--worker-id", required=True)
-    v2_task_claim.add_argument("--profile", default=None)
-    v2_task_claim.add_argument("--lease-seconds", type=int, default=900)
-    v2_task_complete = v2_task_subparsers.add_parser("complete", help="Complete a claimed task.")
-    v2_task_complete.add_argument("project")
-    v2_task_complete.add_argument("task_id")
-    v2_task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"])
-
-    v2_events = v2_subparsers.add_parser("events", help="Show project events as JSON lines.")
-    v2_events.add_argument("project")
-    v2_events.add_argument("--project-id", default=None)
-    v2_events.add_argument("--limit", type=int, default=50)
+    task_parser = subparsers.add_parser("task", help="Manage tasks.")
+    task_subparsers = task_parser.add_subparsers(dest="task_command", required=True)
+    task_create = task_subparsers.add_parser("create", help="Create a task in a workflow.")
+    task_create.add_argument("project")
+    task_create.add_argument("workflow_id")
+    task_create.add_argument("title")
+    task_create.add_argument("--kind", required=True)
+    task_create.add_argument("--profile", default=None)
+    task_create.add_argument("--depends-on", action="append", default=[])
+    task_create.add_argument("--skill", action="append", default=[])
+    task_create.add_argument("--prompt-template-id", default=None)
+    task_create.add_argument("--output", action="append", default=[])
+    task_create.add_argument("--gate", action="append", default=[])
+    task_create.add_argument("--prompt-text", default=None)
+    task_create.add_argument("--priority", type=int, default=100)
+    task_create.add_argument("--risk-level", default="medium")
+    task_create.add_argument("--created-by", default=None)
+    task_create.add_argument("--created-reason", default=None)
+    task_list = task_subparsers.add_parser("list", help="List tasks in a workflow.")
+    task_list.add_argument("project")
+    task_list.add_argument("workflow_id")
+    task_claim = task_subparsers.add_parser("claim", help="Claim the next ready task.")
+    task_claim.add_argument("project")
+    task_claim.add_argument("workflow_id")
+    task_claim.add_argument("--worker-id", required=True)
+    task_claim.add_argument("--profile", default=None)
+    task_claim.add_argument("--lease-seconds", type=int, default=900)
+    task_complete = task_subparsers.add_parser("complete", help="Complete a claimed task.")
+    task_complete.add_argument("project")
+    task_complete.add_argument("task_id")
+    task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"])
 
     args = parser.parse_args(argv)
 
     try:
         if args.command == "config":
             return _handle_config(args)
-        if args.command == "v2":
-            return _handle_v2(args)
+        if args.command == "project":
+            return _handle_project(args)
+        if args.command == "workitem":
+            return _handle_workitem(args)
+        if args.command == "prompt-template":
+            return _handle_prompt_template(args)
+        if args.command == "workflow":
+            return _handle_workflow(args)
+        if args.command == "task":
+            return _handle_task(args)
 
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
@@ -217,27 +221,7 @@ def _handle_config(args: argparse.Namespace) -> int:
     return 2
 
 
-def _handle_v2(args: argparse.Namespace) -> int:
-    if args.v2_command == "project":
-        return _handle_v2_project(args)
-    if args.v2_command == "workitem":
-        return _handle_v2_workitem(args)
-    if args.v2_command == "prompt-template":
-        return _handle_v2_prompt_template(args)
-    if args.v2_command == "workflow":
-        return _handle_v2_workflow(args)
-    if args.v2_command == "task":
-        return _handle_v2_task(args)
-    if args.v2_command == "events":
-        storage = _project_storage(args.project)
-        project_id = args.project_id or Path(args.project).expanduser().name
-        for event in storage.list_events(project_id, limit=args.limit):
-            print(json.dumps(event, sort_keys=True))
-        return 0
-    return 2
-
-
-def _handle_v2_project(args: argparse.Namespace) -> int:
+def _handle_project(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.project_command == "init":
@@ -247,10 +231,14 @@ def _handle_v2_project(args: argparse.Namespace) -> int:
     if args.project_command == "show":
         _print_json(storage.get_project(project_id))
         return 0
+    if args.project_command == "events":
+        for event in storage.list_events(project_id, limit=args.limit):
+            print(json.dumps(event, sort_keys=True))
+        return 0
     return 2
 
 
-def _handle_v2_workitem(args: argparse.Namespace) -> int:
+def _handle_workitem(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.workitem_command == "create":
@@ -274,7 +262,7 @@ def _handle_v2_workitem(args: argparse.Namespace) -> int:
     return 2
 
 
-def _handle_v2_prompt_template(args: argparse.Namespace) -> int:
+def _handle_prompt_template(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.prompt_template_command == "create":
@@ -298,7 +286,7 @@ def _handle_v2_prompt_template(args: argparse.Namespace) -> int:
     return 2
 
 
-def _handle_v2_workflow(args: argparse.Namespace) -> int:
+def _handle_workflow(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.workflow_command == "create":
@@ -307,7 +295,7 @@ def _handle_v2_workflow(args: argparse.Namespace) -> int:
     return 2
 
 
-def _handle_v2_task(args: argparse.Namespace) -> int:
+def _handle_task(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     if args.task_command == "create":
         _print_json(
