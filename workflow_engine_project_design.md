@@ -20,7 +20,9 @@ HWE should still support static YAML workflows, but the primary project model be
 - Treat `Task` as the worker-facing unit of execution.
 - Support both new-project work and modification requests against existing projects.
 - Let planner profiles clarify requirements before execution.
+- Manage reusable role prompt templates so reviewer, planner, coder, and QA best practices can accumulate per project.
 - Let workers report missing information during execution without pretending the task is complete.
+- Let each task explicitly declare the skills it expects the worker to load or follow.
 - Allow human approval gates for risky or irreversible actions.
 - Let planner profiles dynamically create, cancel, or revise tasks based on run results and gate failures.
 - Keep context bundles, prompts, logs, diffs, artifacts, decisions, approvals, and gate results auditable.
@@ -114,6 +116,8 @@ status: pending | ready | claimed | running | waiting_for_info | waiting_for_app
 dependencies
 locks
 context_contract
+skills
+prompt_template_id
 prompt
 outputs
 gates
@@ -136,7 +140,20 @@ The planner is responsible for product and workflow decisions:
 
 The planner can be a Hermes `reviewer` profile backed by Gemma or another local model.
 
-### 4.7 Worker
+### 4.7 Role Prompt Template
+
+A role prompt template is a reusable project-scoped instruction block for a worker role.
+
+Examples:
+
+- Reviewer implementation review checklist.
+- Planner decomposition best practices.
+- QA acceptance criteria verification template.
+- Coder constraints for small-slice implementation.
+
+Templates should be versioned by `role`, `name`, and `version`. A task may reference a template by id and may still include task-specific prompt text. This lets the project accumulate stable role guidance without copying the same best-practice text into every task.
+
+### 4.8 Worker
 
 Workers execute tasks from the queue. They should not make broad product decisions.
 
@@ -148,7 +165,7 @@ Examples:
 
 Workers may report missing information or request approval, but they should not silently invent missing requirements.
 
-### 4.8 Human Action
+### 4.9 Human Action
 
 Some tasks need a human before continuing. HWE should model these explicitly.
 
@@ -500,6 +517,7 @@ The UI should show:
 - Conversation and clarification panel.
 - Task queue with status, profile, locks, and attempts.
 - Workflow graph.
+- Role prompt templates by role and version.
 - Human actions waiting for answer or approval.
 - Planner decisions.
 - Logs, context bundles, artifacts, and diffs.
@@ -522,9 +540,11 @@ sqlite3 .engine/engine.db < schema/engine_schema.sql
 The schema includes tables for:
 
 - Projects and project policy.
+- Role prompt templates.
 - Conversations and messages.
 - Work items and acceptance criteria.
 - Workflows and tasks.
+- Task skill requirements.
 - Task dependencies and locks.
 - Worker claims and runs.
 - Context bundles, artifacts, gates, decisions, human actions, checkpoints, and events.

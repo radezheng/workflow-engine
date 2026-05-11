@@ -18,8 +18,23 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
         requirements="Support Markdown notes.",
         acceptance=["Create notes", "Preview Markdown"],
     )
+    template = storage.create_role_prompt_template(
+        project["id"],
+        "reviewer",
+        "implementation-review",
+        "Check correctness, tests, security, and regression risk.",
+        description="Default reviewer best practices",
+        tags=["review", "best-practices"],
+    )
     workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
-    first_task = storage.create_task(workflow["id"], "Design notes", kind="design", profile="reviewer")
+    first_task = storage.create_task(
+        workflow["id"],
+        "Design notes",
+        kind="design",
+        profile="reviewer",
+        skills=["hermes-project-workflow"],
+        prompt_template_id=template["id"],
+    )
     second_task = storage.create_task(
         workflow["id"],
         "Implement notes",
@@ -31,7 +46,10 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     )
 
     assert first_task["status"] == "ready"
+    assert first_task["skills"] == ["hermes-project-workflow"]
+    assert first_task["prompt_template_id"] == template["id"]
     assert second_task["status"] == "pending"
+    assert storage.list_role_prompt_templates(project["id"], role="reviewer")[0]["tags"] == ["review", "best-practices"]
 
     claimed = storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="reviewer")
     assert claimed is not None
@@ -68,3 +86,33 @@ def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> Non
     assert payload["name"] == "CLI Project"
     assert payload["root_path"] == str(project_root.resolve())
     assert (project_root / ".engine" / "engine.db").exists()
+
+
+def test_prompt_template_cli_creates_template(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "template-project"
+    assert main(["v2", "project", "init", str(project_root), "--id", "template-project"]) == 0
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "v2",
+            "prompt-template",
+            "create",
+            str(project_root),
+            "reviewer",
+            "qa-review",
+            "--project-id",
+            "template-project",
+            "--body",
+            "Reject missing tests and unsafe changes.",
+            "--tag",
+            "qa",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["role"] == "reviewer"
+    assert payload["name"] == "qa-review"
+    assert payload["body_md"] == "Reject missing tests and unsafe changes."
+    assert payload["tags"] == ["qa"]

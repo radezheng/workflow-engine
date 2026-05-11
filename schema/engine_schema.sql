@@ -36,6 +36,22 @@ CREATE TABLE IF NOT EXISTS project_policies (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS role_prompt_templates (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '0.1.0',
+    description TEXT NOT NULL DEFAULT '',
+    body_md TEXT NOT NULL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, role, name, version),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS environment_resources (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -129,7 +145,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     risk_level TEXT NOT NULL DEFAULT 'medium',
     prompt_path TEXT,
     prompt_text TEXT,
+    prompt_template_id TEXT,
     context_contract_json TEXT NOT NULL DEFAULT '{}',
+    skills_json TEXT NOT NULL DEFAULT '[]',
     outputs_json TEXT NOT NULL DEFAULT '[]',
     gates_json TEXT NOT NULL DEFAULT '[]',
     allowed_paths_json TEXT NOT NULL DEFAULT '[]',
@@ -142,7 +160,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     ready_at TEXT,
     completed_at TEXT,
     FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
-    FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE
+    FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
+    FOREIGN KEY (prompt_template_id) REFERENCES role_prompt_templates(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS task_dependencies (
@@ -327,6 +346,7 @@ CREATE TABLE IF NOT EXISTS project_events (
 CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON conversation_messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_workitems_project_status ON workitems(project_id, status, priority);
+CREATE INDEX IF NOT EXISTS idx_role_prompt_templates_project_role ON role_prompt_templates(project_id, role, status);
 CREATE INDEX IF NOT EXISTS idx_acceptance_workitem ON acceptance_criteria(workitem_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_workflows_workitem ON project_workflows(workitem_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_workflow_status ON tasks(workflow_id, status, priority);

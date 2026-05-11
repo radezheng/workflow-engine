@@ -69,6 +69,23 @@ def main(argv: list[str] | None = None) -> int:
     v2_workitem_list.add_argument("project")
     v2_workitem_list.add_argument("--project-id", default=None)
 
+    v2_prompt_template = v2_subparsers.add_parser("prompt-template", help="Manage role prompt templates.")
+    v2_prompt_template_subparsers = v2_prompt_template.add_subparsers(dest="prompt_template_command", required=True)
+    v2_prompt_template_create = v2_prompt_template_subparsers.add_parser("create", help="Create a role prompt template.")
+    v2_prompt_template_create.add_argument("project")
+    v2_prompt_template_create.add_argument("role")
+    v2_prompt_template_create.add_argument("name")
+    v2_prompt_template_create.add_argument("--project-id", default=None)
+    v2_prompt_template_create.add_argument("--version", default="0.1.0")
+    v2_prompt_template_create.add_argument("--description", default="")
+    v2_prompt_template_create.add_argument("--body", default=None)
+    v2_prompt_template_create.add_argument("--body-file", default=None)
+    v2_prompt_template_create.add_argument("--tag", action="append", default=[])
+    v2_prompt_template_list = v2_prompt_template_subparsers.add_parser("list", help="List role prompt templates.")
+    v2_prompt_template_list.add_argument("project")
+    v2_prompt_template_list.add_argument("--project-id", default=None)
+    v2_prompt_template_list.add_argument("--role", default=None)
+
     v2_workflow = v2_subparsers.add_parser("workflow", help="Manage workflows.")
     v2_workflow_subparsers = v2_workflow.add_subparsers(dest="workflow_command", required=True)
     v2_workflow_create = v2_workflow_subparsers.add_parser("create", help="Create a workflow for a work item.")
@@ -86,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     v2_task_create.add_argument("--kind", required=True)
     v2_task_create.add_argument("--profile", default=None)
     v2_task_create.add_argument("--depends-on", action="append", default=[])
+    v2_task_create.add_argument("--skill", action="append", default=[])
+    v2_task_create.add_argument("--prompt-template-id", default=None)
     v2_task_create.add_argument("--output", action="append", default=[])
     v2_task_create.add_argument("--gate", action="append", default=[])
     v2_task_create.add_argument("--prompt-text", default=None)
@@ -203,6 +222,8 @@ def _handle_v2(args: argparse.Namespace) -> int:
         return _handle_v2_project(args)
     if args.v2_command == "workitem":
         return _handle_v2_workitem(args)
+    if args.v2_command == "prompt-template":
+        return _handle_v2_prompt_template(args)
     if args.v2_command == "workflow":
         return _handle_v2_workflow(args)
     if args.v2_command == "task":
@@ -253,6 +274,30 @@ def _handle_v2_workitem(args: argparse.Namespace) -> int:
     return 2
 
 
+def _handle_v2_prompt_template(args: argparse.Namespace) -> int:
+    storage = _project_storage(args.project)
+    project_id = args.project_id or Path(args.project).expanduser().name
+    if args.prompt_template_command == "create":
+        _ensure_project(storage, project_id)
+        body = _body_text(args.body, args.body_file, "prompt template body")
+        _print_json(
+            storage.create_role_prompt_template(
+                project_id,
+                args.role,
+                args.name,
+                body,
+                version=args.version,
+                description=args.description,
+                tags=args.tag,
+            )
+        )
+        return 0
+    if args.prompt_template_command == "list":
+        _print_json(storage.list_role_prompt_templates(project_id, role=args.role))
+        return 0
+    return 2
+
+
 def _handle_v2_workflow(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
@@ -272,6 +317,8 @@ def _handle_v2_task(args: argparse.Namespace) -> int:
                 kind=args.kind,
                 profile=args.profile,
                 depends_on=args.depends_on,
+                skills=args.skill,
+                prompt_template_id=args.prompt_template_id,
                 outputs=args.output,
                 gates=args.gate,
                 prompt_text=args.prompt_text,
@@ -309,6 +356,16 @@ def _ensure_project(storage: ProjectStorage, project_id: str) -> None:
 
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _body_text(body: str | None, body_file: str | None, label: str) -> str:
+    if body and body_file:
+        raise ProjectStorageError(f"Provide either --body or --body-file for {label}, not both.")
+    if body_file:
+        return Path(body_file).expanduser().read_text(encoding="utf-8")
+    if body:
+        return body
+    raise ProjectStorageError(f"Missing {label}; provide --body or --body-file.")
 
 
 def project_root() -> Path:

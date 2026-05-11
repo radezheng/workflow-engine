@@ -156,6 +156,21 @@ hwe v2 task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile
 
 When a task is completed with `hwe v2 task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically.
 
+Role prompt templates let a project accumulate reusable planner, reviewer, QA, or coder instructions. Tasks can reference a template and declare the skills they expect:
+
+```bash
+TEMPLATE_ID=$(hwe v2 prompt-template create my-project reviewer implementation-review \
+  --body "Check correctness, tests, security, regressions, and acceptance evidence." \
+  --tag review --tag best-practices \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+hwe v2 task create my-project "$WORKFLOW_ID" "Review implementation" \
+  --kind review \
+  --profile reviewer \
+  --prompt-template-id "$TEMPLATE_ID" \
+  --skill hermes-project-workflow
+```
+
 ## Current Validator Names
 
 - `git_initialized`

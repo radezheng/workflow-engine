@@ -163,6 +163,58 @@ class ProjectStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def create_role_prompt_template(
+        self,
+        project_id: str,
+        role: str,
+        name: str,
+        body: str,
+        *,
+        version: str = "0.1.0",
+        description: str = "",
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.get_project(project_id)
+        timestamp = now_iso()
+        template_id = _id("prompt")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO role_prompt_templates(id, project_id, role, name, version, description, body_md, tags_json, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (template_id, project_id, role, name, version, description, body, _json(tags or []), timestamp, timestamp),
+            )
+        self.event(project_id, None, None, None, "role_prompt_template_created", {"role": role, "name": name, "version": version})
+        return self.get_role_prompt_template(template_id)
+
+    def get_role_prompt_template(self, template_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM role_prompt_templates WHERE id=?", (template_id,)).fetchone()
+        if row is None:
+            raise ProjectStorageError(f"Unknown role prompt template: {template_id}")
+        template = dict(row)
+        template["tags"] = json.loads(template.pop("tags_json"))
+        return template
+
+    def list_role_prompt_templates(self, project_id: str, *, role: str | None = None) -> list[dict[str, Any]]:
+        self.get_project(project_id)
+        query = "SELECT * FROM role_prompt_templates WHERE project_id=?"
+        params: list[Any] = [project_id]
+        if role:
+            query += " AND role=?"
+            params.append(role)
+        query += " ORDER BY role, name, version"
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        templates = []
+        for row in rows:
+            template = dict(row)
+            template["tags"] = json.loads(template.pop("tags_json"))
+            templates.append(template)
+        return templates
+
     def create_workflow(self, project_id: str, workitem_id: str, *, planner_profile: str | None = None) -> dict[str, Any]:
         workitem = self.get_workitem(workitem_id)
         if workitem["project_id"] != project_id:
@@ -202,6 +254,8 @@ class ProjectStorage:
         depends_on: list[str] | None = None,
         outputs: list[str] | None = None,
         gates: list[str] | None = None,
+        skills: list[str] | None = None,
+        prompt_template_id: str | None = None,
         prompt_text: str | None = None,
         priority: int = 100,
         risk_level: str = "medium",
@@ -214,13 +268,20 @@ class ProjectStorage:
         dependencies = depends_on or []
         status = "pending" if dependencies else "ready"
         with self.connect() as connection:
+            if prompt_template_id:
+                template_row = connection.execute(
+                    "SELECT 1 FROM role_prompt_templates WHERE id=? AND project_id=?",
+                    (prompt_template_id, workflow["project_id"]),
+                ).fetchone()
+                if template_row is None:
+                    raise ProjectStorageError(f"Unknown prompt template for project {workflow['project_id']}: {prompt_template_id}")
             for dependency in dependencies:
                 if connection.execute("SELECT 1 FROM tasks WHERE id=? AND workflow_id=?", (dependency, workflow_id)).fetchone() is None:
                     raise ProjectStorageError(f"Unknown dependency for workflow {workflow_id}: {dependency}")
             connection.execute(
                 """
-                INSERT INTO tasks(id, workflow_id, workitem_id, title, kind, profile, status, priority, risk_level, prompt_text, outputs_json, gates_json, created_by, created_reason, created_at, updated_at, ready_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks(id, workflow_id, workitem_id, title, kind, profile, status, priority, risk_level, prompt_template_id, prompt_text, skills_json, outputs_json, gates_json, created_by, created_reason, created_at, updated_at, ready_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -232,7 +293,9 @@ class ProjectStorage:
                     status,
                     priority,
                     risk_level,
+                    prompt_template_id,
                     prompt_text,
+                    _json(skills or []),
                     _json(outputs or []),
                     _json(gates or []),
                     created_by,
@@ -390,7 +453,7 @@ class ProjectStorage:
             )
 
     def _decode_task(self, task: dict[str, Any]) -> dict[str, Any]:
-        for key in ["context_contract_json", "outputs_json", "gates_json", "allowed_paths_json"]:
+        for key in ["context_contract_json", "skills_json", "outputs_json", "gates_json", "allowed_paths_json"]:
             output_key = key.removesuffix("_json")
             task[output_key] = json.loads(task.pop(key))
         return task
