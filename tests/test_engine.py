@@ -137,6 +137,31 @@ def test_prompt_template_root_config_is_relative_to_hwe_config_directory(tmp_pat
     assert config.prompt_template_root == hwe_root / "role-prompts"
 
 
+def test_hwe_config_loads_profile_preflight(tmp_path: Path) -> None:
+    config_path = tmp_path / "hwe.config.yaml"
+    config_path.write_text(
+        """
+profiles:
+  coder:
+    switch_command: lms unload --all
+    hermes_command: coder
+    hermes_args: [--accept-hooks]
+    success_exit_codes: [0, -6]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.profile_config("coder") == {
+        "switch_command": "lms unload --all",
+        "hermes_command": "coder",
+        "hermes_args": ["--accept-hooks"],
+        "success_exit_codes": [0, -6],
+    }
+    assert config.profile_config("reviewer") == {}
+
+
 def test_hermes_profile_command_uses_current_cli_shape(tmp_path: Path) -> None:
     workflow_path = tmp_path / "workflow.yaml"
     prompt_path = tmp_path / "prompt.md"

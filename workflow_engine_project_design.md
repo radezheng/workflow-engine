@@ -511,6 +511,8 @@ hwe worker run --profile coder
 
 The first runnable path is push-style execution: `hwe run-workitem` claims ready tasks, records task runs, writes prompts/logs, and completes or fails tasks through the project queue. The schema still supports pull-style worker claims for future daemon workers.
 
+Project workflow runners should use HWE-local profile preflight settings from `hwe.config.yaml`, such as `profiles.<name>.switch_command`, `healthcheck`, `hermes_command`, and `success_exit_codes`. These settings are machine/runtime concerns and must not be embedded in skills or generated target projects.
+
 ## 10. UI Sketch
 
 The UI should show:

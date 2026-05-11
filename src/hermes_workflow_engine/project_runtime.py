@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import HWEConfig, load_config
 from .project_storage import ProjectStorage
 
 
@@ -24,9 +28,10 @@ class ProjectRunSummary:
 
 
 class ProjectRuntime:
-    def __init__(self, storage: ProjectStorage, *, dry_run: bool = False):
+    def __init__(self, storage: ProjectStorage, *, dry_run: bool = False, config: HWEConfig | None = None):
         self.storage = storage
         self.dry_run = dry_run
+        self.config = load_config() if config is None else config
 
     def run_workitem(
         self,
@@ -124,24 +129,34 @@ class ProjectRuntime:
         stderr_path: Path,
     ) -> tuple[str, int | None, dict[str, Any]]:
         profile_name = task.get("profile") or "default"
-        command = self._hermes_command_args(profile_name, prompt_text)
+        profile_config = self.config.profile_config(profile_name)
+        command = self._hermes_command_args(profile_name, profile_config, prompt_text)
         if self.dry_run:
             stdout_path.write_text(f"DRY RUN: would invoke {' '.join(shlex.quote(part) for part in command)}\n", encoding="utf-8")
             stderr_path.write_text("", encoding="utf-8")
             return "succeeded", 0, {"dry_run": True, "profile": profile_name}
 
-        completed = subprocess.run(
-            command,
-            cwd=self.storage.project_root,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=3600,
-        )
-        stdout_path.write_text(completed.stdout, encoding="utf-8")
-        stderr_path.write_text(completed.stderr, encoding="utf-8")
-        status = "succeeded" if completed.returncode == 0 else "failed"
+        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+            try:
+                self._run_switch_command(profile_config, stdout, stderr)
+                self._healthcheck(profile_config)
+            except RuntimeError as exc:
+                stderr.write(f"{exc}\n")
+                return "failed", None, {"profile": profile_name, "error": str(exc)}
+
+            completed = subprocess.run(
+                command,
+                cwd=self.storage.project_root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=int(profile_config.get("timeout_seconds", 3600)),
+            )
+            stdout.write(completed.stdout)
+            stderr.write(completed.stderr)
+
+        status = "succeeded" if self._is_success_exit_code(completed.returncode, profile_config) else "failed"
         return status, completed.returncode, {"profile": profile_name}
 
     def _build_prompt(self, task: dict[str, Any]) -> str:
@@ -184,9 +199,69 @@ class ProjectRuntime:
         parts.append("\n".join(metadata))
         return "\n\n".join(part for part in parts if part.strip())
 
-    def _hermes_command_args(self, profile_name: str, prompt_text: str) -> list[str]:
-        if profile_name != "default" and shutil.which(profile_name):
-            base_command = [profile_name]
+    def _hermes_command_args(self, profile_name: str, profile_config: dict[str, Any], prompt_text: str) -> list[str]:
+        hermes_profile = str(profile_config.get("hermes_profile", profile_name))
+        configured_command = profile_config.get("hermes_command") or profile_config.get("command")
+        if configured_command:
+            base_command = shlex.split(str(configured_command))
+        elif hermes_profile != "default" and shutil.which(hermes_profile):
+            base_command = [hermes_profile]
         else:
             base_command = [os.environ.get("HERMES_BIN", "hermes")]
-        return [*base_command, "chat", "-Q", "--source", "workflow-engine", "-q", prompt_text]
+
+        extra_args = profile_config.get("hermes_args", [])
+        if isinstance(extra_args, str):
+            extra_args = shlex.split(extra_args)
+        elif not isinstance(extra_args, list):
+            extra_args = []
+        return [*base_command, "chat", "-Q", "--source", "workflow-engine", *[str(arg) for arg in extra_args], "-q", prompt_text]
+
+    def _run_switch_command(self, profile_config: dict[str, Any], stdout: Any, stderr: Any) -> None:
+        switch_command = profile_config.get("switch_command")
+        if not switch_command:
+            return
+        stdout.write(f"$ {switch_command}\n")
+        stdout.flush()
+        completed = subprocess.run(
+            str(switch_command),
+            cwd=self.storage.project_root,
+            shell=True,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=int(profile_config.get("switch_timeout_seconds", 900)),
+        )
+        stdout.write(completed.stdout)
+        stderr.write(completed.stderr)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Model switch command failed with exit code {completed.returncode}")
+
+    def _healthcheck(self, profile_config: dict[str, Any]) -> None:
+        healthcheck = profile_config.get("healthcheck")
+        if not isinstance(healthcheck, dict) or not healthcheck.get("url"):
+            return
+        payload = {
+            "model": healthcheck.get("model", profile_config.get("model", "")),
+            "messages": [{"role": "user", "content": "healthcheck"}],
+            "max_tokens": 4,
+        }
+        request = urllib.request.Request(
+            str(healthcheck["url"]),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if response.status >= 400:
+                    raise RuntimeError(f"Model healthcheck failed with HTTP {response.status}")
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Model healthcheck failed: {exc}") from exc
+
+    def _is_success_exit_code(self, exit_code: int, profile_config: dict[str, Any]) -> bool:
+        success_exit_codes = profile_config.get("success_exit_codes", [0])
+        if not isinstance(success_exit_codes, list):
+            success_exit_codes = [0]
+        allowed = {int(code) for code in success_exit_codes if isinstance(code, int) or str(code).lstrip("-").isdigit()}
+        return exit_code in allowed

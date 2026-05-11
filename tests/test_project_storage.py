@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from hermes_workflow_engine.cli import main
+from hermes_workflow_engine.config import HWEConfig
 from hermes_workflow_engine.project_runtime import ProjectRuntime
 from hermes_workflow_engine.project_storage import ProjectStorage
 
@@ -284,3 +285,42 @@ def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) ->
     assert "Review design scope carefully." in prompt_text
     assert "Support Markdown notes." in prompt_text
     assert "hermes-project-workflow" in prompt_text
+
+
+def test_project_runtime_runs_profile_switch_before_agent(tmp_path: Path) -> None:
+    project_root = tmp_path / "switch-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("switch-runtime")
+    workitem = storage.create_workitem(project["id"], "Switch before coding")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Use coder",
+        kind="design",
+        profile="coder",
+        prompt_text="Do the work.",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('hermes_invoked.txt').write_text(' '.join(sys.argv[1:]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    switch_marker = project_root / "switch_marker.txt"
+    config = HWEConfig(
+        profiles={
+            "coder": {
+                "switch_command": f"python3 -c \"from pathlib import Path; Path('{switch_marker}').write_text('switched', encoding='utf-8')\"",
+                "hermes_command": f"python3 {fake_hermes}",
+            }
+        }
+    )
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert storage.get_task(task["id"])["status"] == "succeeded"
+    assert switch_marker.read_text(encoding="utf-8") == "switched"
+    assert (project_root / "hermes_invoked.txt").read_text(encoding="utf-8").startswith("chat -Q --source workflow-engine")

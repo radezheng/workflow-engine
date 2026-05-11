@@ -16,8 +16,14 @@ class ConfigError(ValueError):
 class HWEConfig:
     default_workspace_root: Path | None = None
     prompt_template_root: Path | None = None
+    profiles: dict[str, Any] | None = None
     source_path: Path | None = None
     raw: dict[str, Any] | None = None
+
+    def profile_config(self, profile_name: str) -> dict[str, Any]:
+        profiles = self.profiles or {}
+        raw_profile = profiles.get(profile_name, {})
+        return dict(raw_profile) if isinstance(raw_profile, dict) else {}
 
 
 def default_config_path() -> Path:
@@ -41,7 +47,7 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
     if not config_path.exists():
         if path or os.environ.get("HWE_CONFIG"):
             raise ConfigError(f"HWE config does not exist: {config_path}")
-        return HWEConfig(prompt_template_root=(config_path.parent / "ptemplate").resolve(), source_path=config_path, raw={})
+        return HWEConfig(prompt_template_root=(config_path.parent / "ptemplate").resolve(), profiles={}, source_path=config_path, raw={})
 
     with config_path.open("r", encoding="utf-8") as file:
         raw = yaml.safe_load(file) or {}
@@ -60,7 +66,11 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
         raise ConfigError("`prompt_template_root` must be a non-empty string.")
     prompt_template_root = _resolve_config_path(config_path, prompt_template_value)
 
-    return HWEConfig(default_workspace_root=default_workspace_root, prompt_template_root=prompt_template_root, source_path=config_path, raw=raw)
+    profiles = raw.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ConfigError("`profiles` must be a mapping when provided.")
+
+    return HWEConfig(default_workspace_root=default_workspace_root, prompt_template_root=prompt_template_root, profiles=profiles, source_path=config_path, raw=raw)
 
 
 def write_config(config: HWEConfig, path: str | Path | None = None, *, force: bool = False) -> Path:
@@ -73,6 +83,8 @@ def write_config(config: HWEConfig, path: str | Path | None = None, *, force: bo
         raw["default_workspace_root"] = str(config.default_workspace_root.expanduser())
     if config.prompt_template_root is not None:
         raw["prompt_template_root"] = str(config.prompt_template_root.expanduser())
+    if config.profiles:
+        raw["profiles"] = config.profiles
     with config_path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(raw, file, sort_keys=False)
     return config_path

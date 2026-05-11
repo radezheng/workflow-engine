@@ -76,6 +76,20 @@ prompt_template_root: ./ptemplate
 
 `prompt_template_root` is an HWE-side template library path, not a target project path. Relative values are resolved from the directory containing `hwe.config.yaml`; the default is `./ptemplate`.
 
+Project workflow agent tasks can also use HWE-local profile preflight settings:
+
+```yaml
+profiles:
+  coder:
+    hermes_command: coder
+    switch_command: ./scripts/use-coder-model.sh
+    healthcheck:
+      url: http://127.0.0.1:1234/v1/chat/completions
+      model: coder-model
+```
+
+`run-workitem` runs `switch_command` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
+
 Then a workflow can specify only the project name:
 
 ```yaml
