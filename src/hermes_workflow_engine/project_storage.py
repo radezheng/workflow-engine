@@ -13,21 +13,21 @@ from .config import HWEConfig, load_config
 from .storage import now_iso
 
 
-class V2StorageError(ValueError):
-    """Raised when a V2 storage operation is invalid."""
+class ProjectStorageError(ValueError):
+    """Raised when a project storage operation is invalid."""
 
 
 @dataclass(frozen=True)
-class V2Paths:
+class ProjectPaths:
     project_root: Path
     engine_dir: Path
     db_path: Path
 
 
-def v2_paths_for_project(project_root: Path) -> V2Paths:
+def paths_for_project(project_root: Path) -> ProjectPaths:
     root = project_root.expanduser().resolve()
     engine_dir = root / ".engine"
-    return V2Paths(project_root=root, engine_dir=engine_dir, db_path=engine_dir / "engine.db")
+    return ProjectPaths(project_root=root, engine_dir=engine_dir, db_path=engine_dir / "engine.db")
 
 
 def resolve_project_root(name_or_path: str, config: HWEConfig | None = None) -> Path:
@@ -36,14 +36,14 @@ def resolve_project_root(name_or_path: str, config: HWEConfig | None = None) -> 
         return path.resolve()
     config = load_config() if config is None else config
     if config.default_workspace_root is None:
-        raise V2StorageError("Project name requires HWE config `default_workspace_root`; pass an absolute path or run `hwe config init`.")
+        raise ProjectStorageError("Project name requires HWE config `default_workspace_root`; pass an absolute path or run `hwe config init`.")
     return (config.default_workspace_root / path).resolve()
 
 
 def _schema_sql() -> str:
-    schema_path = Path(__file__).resolve().parents[2] / "schema" / "engine_v2_schema.sql"
+    schema_path = Path(__file__).resolve().parents[2] / "schema" / "engine_schema.sql"
     if not schema_path.exists():
-        raise V2StorageError(f"V2 schema file not found: {schema_path}")
+        raise ProjectStorageError(f"Project schema file not found: {schema_path}")
     return schema_path.read_text(encoding="utf-8")
 
 
@@ -55,9 +55,9 @@ def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True)
 
 
-class V2Storage:
+class ProjectStorage:
     def __init__(self, project_root: Path):
-        self.paths = v2_paths_for_project(project_root)
+        self.paths = paths_for_project(project_root)
         self.project_root = self.paths.project_root
         self.engine_dir = self.paths.engine_dir
         self.db_path = self.paths.db_path
@@ -103,7 +103,7 @@ class V2Storage:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         if row is None:
-            raise V2StorageError(f"Unknown project: {project_id}")
+            raise ProjectStorageError(f"Unknown project: {project_id}")
         return dict(row)
 
     def list_projects(self) -> list[dict[str, Any]]:
@@ -151,7 +151,7 @@ class V2Storage:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM workitems WHERE id=?", (workitem_id,)).fetchone()
         if row is None:
-            raise V2StorageError(f"Unknown workitem: {workitem_id}")
+            raise ProjectStorageError(f"Unknown workitem: {workitem_id}")
         return dict(row)
 
     def list_workitems(self, project_id: str) -> list[dict[str, Any]]:
@@ -166,13 +166,13 @@ class V2Storage:
     def create_workflow(self, project_id: str, workitem_id: str, *, planner_profile: str | None = None) -> dict[str, Any]:
         workitem = self.get_workitem(workitem_id)
         if workitem["project_id"] != project_id:
-            raise V2StorageError("Workitem does not belong to project.")
+            raise ProjectStorageError("Workitem does not belong to project.")
         timestamp = now_iso()
         workflow_id = _id("wf")
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO workflows_v2(id, project_id, workitem_id, status, planner_profile, created_at, updated_at)
+                INSERT INTO project_workflows(id, project_id, workitem_id, status, planner_profile, created_at, updated_at)
                 VALUES(?, ?, ?, 'planning', ?, ?, ?)
                 """,
                 (workflow_id, project_id, workitem_id, planner_profile, timestamp, timestamp),
@@ -187,9 +187,9 @@ class V2Storage:
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         self.initialize()
         with self.connect() as connection:
-            row = connection.execute("SELECT * FROM workflows_v2 WHERE id=?", (workflow_id,)).fetchone()
+            row = connection.execute("SELECT * FROM project_workflows WHERE id=?", (workflow_id,)).fetchone()
         if row is None:
-            raise V2StorageError(f"Unknown workflow: {workflow_id}")
+            raise ProjectStorageError(f"Unknown workflow: {workflow_id}")
         return dict(row)
 
     def create_task(
@@ -216,7 +216,7 @@ class V2Storage:
         with self.connect() as connection:
             for dependency in dependencies:
                 if connection.execute("SELECT 1 FROM tasks WHERE id=? AND workflow_id=?", (dependency, workflow_id)).fetchone() is None:
-                    raise V2StorageError(f"Unknown dependency for workflow {workflow_id}: {dependency}")
+                    raise ProjectStorageError(f"Unknown dependency for workflow {workflow_id}: {dependency}")
             connection.execute(
                 """
                 INSERT INTO tasks(id, workflow_id, workitem_id, title, kind, profile, status, priority, risk_level, prompt_text, outputs_json, gates_json, created_by, created_reason, created_at, updated_at, ready_at)
@@ -255,15 +255,15 @@ class V2Storage:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT tasks.*, workflows_v2.project_id
+                SELECT tasks.*, project_workflows.project_id
                 FROM tasks
-                JOIN workflows_v2 ON workflows_v2.id = tasks.workflow_id
+                JOIN project_workflows ON project_workflows.id = tasks.workflow_id
                 WHERE tasks.id=?
                 """,
                 (task_id,),
             ).fetchone()
         if row is None:
-            raise V2StorageError(f"Unknown task: {task_id}")
+            raise ProjectStorageError(f"Unknown task: {task_id}")
         return self._decode_task(dict(row))
 
     def list_tasks(self, workflow_id: str) -> list[dict[str, Any]]:
@@ -338,7 +338,7 @@ class V2Storage:
 
     def complete_task(self, task_id: str, *, status: str = "succeeded", result: dict[str, Any] | None = None) -> dict[str, Any]:
         if status not in {"succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"}:
-            raise V2StorageError(f"Unsupported completion status: {status}")
+            raise ProjectStorageError(f"Unsupported completion status: {status}")
         task = self.get_task(task_id)
         timestamp = now_iso()
         with self.connect() as connection:
@@ -356,7 +356,7 @@ class V2Storage:
 
     def list_events(self, project_id: str | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
         self.initialize()
-        query = "SELECT * FROM events_v2"
+        query = "SELECT * FROM project_events"
         params: tuple[Any, ...] = ()
         if project_id:
             query += " WHERE project_id=?"
@@ -383,7 +383,7 @@ class V2Storage:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO events_v2(project_id, workitem_id, workflow_id, task_id, type, payload_json, created_at)
+                INSERT INTO project_events(project_id, workitem_id, workflow_id, task_id, type, payload_json, created_at)
                 VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
                 (project_id, workitem_id, workflow_id, task_id, event_type, _json(payload), now_iso()),

@@ -1,17 +1,17 @@
-# Hermes Workflow Engine V2 Design
+# Hermes Workflow Engine Project Design
 
 Date: 2026-05-11
 Status: Draft
 
 ## 1. Purpose
 
-HWE v1 runs a mostly static workflow graph. V2 turns HWE into a project-level work management system for Hermes profiles.
+HWE started as a mostly static workflow graph. Project workflow mode turns it into a project-level work management system for Hermes profiles.
 
 The goal is:
 
 > A human describes a new or changed requirement. The system clarifies missing information when needed, creates a project work item, lets a planner design and decompose the work, dispatches focused tasks to worker profiles, dynamically creates follow-up tasks from evidence, waits for human approval at risk points, validates the result, and closes the work item with audit records and recovery checkpoints.
 
-V2 should still support static YAML workflows, but the primary model becomes project plus work items plus a dynamic task queue.
+HWE should still support static YAML workflows, but the primary project model becomes project plus work items plus a dynamic task queue.
 
 ## 2. Design Goals
 
@@ -25,7 +25,7 @@ V2 should still support static YAML workflows, but the primary model becomes pro
 - Let planner profiles dynamically create, cancel, or revise tasks based on run results and gate failures.
 - Keep context bundles, prompts, logs, diffs, artifacts, decisions, approvals, and gate results auditable.
 - Keep one `.engine/` per project so projects can be tracked and recovered independently.
-- Store the V2 database schema separately so another machine can install or migrate the engine state format.
+- Store the project database schema separately so another machine can install or migrate the engine state format.
 
 ## 3. Non-Goals
 
@@ -95,7 +95,7 @@ created_from_conversation_id
 
 A workflow is the planner's current execution strategy for a work item. It may start partial and grow dynamically.
 
-V1 YAML workflows remain useful as an import/export format, but V2 should persist workflows and tasks in the project database.
+Static YAML workflows remain useful as an import/export format, but project workflow mode should persist workflows and tasks in the project database.
 
 ### 4.5 Task
 
@@ -150,7 +150,7 @@ Workers may report missing information or request approval, but they should not 
 
 ### 4.8 Human Action
 
-Some tasks need a human before continuing. V2 should model these explicitly.
+Some tasks need a human before continuing. HWE should model these explicitly.
 
 Two primary human action kinds:
 
@@ -468,7 +468,7 @@ Rules:
 
 ## 9. CLI Sketch
 
-Initial V2 commands:
+Initial project workflow commands:
 
 ```bash
 hwe project init /path/to/project
@@ -509,14 +509,14 @@ The UI should show:
 
 The installable SQLite schema is stored separately at:
 
-- [schema/engine_v2_schema.sql](schema/engine_v2_schema.sql)
+- [schema/engine_schema.sql](schema/engine_schema.sql)
 
 The schema intentionally uses SQLite-compatible types and JSON-as-text fields so it can be installed locally and later migrated to Postgres if needed.
 
 Install example:
 
 ```bash
-sqlite3 .engine/engine.db < schema/engine_v2_schema.sql
+sqlite3 .engine/engine.db < schema/engine_schema.sql
 ```
 
 The schema includes tables for:
@@ -533,7 +533,7 @@ The schema includes tables for:
 
 ### Phase 1: Persistent Project Work Items
 
-- Add V2 schema migration or install path.
+- Add project schema migration or install path.
 - Add `Project`, `Conversation`, `WorkItem`, and `AcceptanceCriteria` storage APIs.
 - Add CLI commands to create/list/show work items.
 - Bind existing workflow IDs to work items.
@@ -568,13 +568,13 @@ The schema includes tables for:
 
 - Should work item IDs be human-readable slugs, UUIDs, or both?
 - Should planner-generated tasks be stored as prompt text, prompt files, or both?
-- Should `.engine/engine.db` support automatic migrations, or should V2 use a fresh database for now?
+- Should `.engine/engine.db` support automatic migrations, or should project workflow mode use a fresh database for now?
 - What human approvals are mandatory by default versus configured per project?
-- Should worker daemon mode be added now, or only after push-style V2 works?
+- Should worker daemon mode be added now, or only after push-style project workflow execution works?
 
 ## 14. Summary
 
-HWE V2 should move from static workflow execution to dynamic project work management.
+HWE should move from static workflow execution to dynamic project work management.
 
 The central loop is:
 

@@ -1,6 +1,6 @@
--- Hermes Workflow Engine V2 schema
+-- Hermes Workflow Engine project schema
 -- SQLite-compatible install schema.
--- Install with: sqlite3 .engine/engine.db < schema/engine_v2_schema.sql
+-- Install with: sqlite3 .engine/engine.db < schema/engine_schema.sql
 
 PRAGMA foreign_keys = ON;
 
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS acceptance_criteria (
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS workflows_v2 (
+CREATE TABLE IF NOT EXISTS project_workflows (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     workitem_id TEXT NOT NULL,
@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TEXT NOT NULL,
     ready_at TEXT,
     completed_at TEXT,
-    FOREIGN KEY (workflow_id) REFERENCES workflows_v2(id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE
 );
 
@@ -194,12 +194,12 @@ CREATE TABLE IF NOT EXISTS task_runs (
     stderr_path TEXT,
     prompt_path TEXT,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-    FOREIGN KEY (workflow_id) REFERENCES workflows_v2(id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
     FOREIGN KEY (claim_id) REFERENCES worker_claims(id) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS context_bundles_v2 (
+CREATE TABLE IF NOT EXISTS task_context_bundles (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS context_bundles_v2 (
     FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS artifacts_v2 (
+CREATE TABLE IF NOT EXISTS task_artifacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
@@ -226,7 +226,7 @@ CREATE TABLE IF NOT EXISTS artifacts_v2 (
     FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS gate_results_v2 (
+CREATE TABLE IF NOT EXISTS task_gate_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,
     run_id TEXT,
@@ -254,7 +254,7 @@ CREATE TABLE IF NOT EXISTS planner_decisions (
     created_tasks_json TEXT NOT NULL DEFAULT '[]',
     cancelled_tasks_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
-    FOREIGN KEY (workflow_id) REFERENCES workflows_v2(id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
     FOREIGN KEY (source_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
     FOREIGN KEY (source_run_id) REFERENCES task_runs(id) ON DELETE SET NULL
@@ -283,7 +283,7 @@ CREATE TABLE IF NOT EXISTS human_actions (
     expires_at TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
-    FOREIGN KEY (workflow_id) REFERENCES workflows_v2(id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL,
     FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE SET NULL,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
@@ -302,10 +302,10 @@ CREATE TABLE IF NOT EXISTS git_checkpoints (
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
-    FOREIGN KEY (workflow_id) REFERENCES workflows_v2(id) ON DELETE CASCADE
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS events_v2 (
+CREATE TABLE IF NOT EXISTS project_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT,
     workitem_id TEXT,
@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS events_v2 (
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
-    FOREIGN KEY (workflow_id) REFERENCES workflows_v2(id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
     FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (human_action_id) REFERENCES human_actions(id) ON DELETE SET NULL
@@ -328,7 +328,7 @@ CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON conversation_messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_workitems_project_status ON workitems(project_id, status, priority);
 CREATE INDEX IF NOT EXISTS idx_acceptance_workitem ON acceptance_criteria(workitem_id, ordinal);
-CREATE INDEX IF NOT EXISTS idx_workflows_workitem ON workflows_v2(workitem_id, status);
+CREATE INDEX IF NOT EXISTS idx_workflows_workitem ON project_workflows(workitem_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_workflow_status ON tasks(workflow_id, status, priority);
 CREATE INDEX IF NOT EXISTS idx_tasks_workitem_status ON tasks(workitem_id, status);
 CREATE INDEX IF NOT EXISTS idx_task_deps_depends ON task_dependencies(depends_on_task_id);
@@ -336,4 +336,4 @@ CREATE INDEX IF NOT EXISTS idx_claims_task_status ON worker_claims(task_id, stat
 CREATE INDEX IF NOT EXISTS idx_runs_task_attempt ON task_runs(task_id, attempt);
 CREATE INDEX IF NOT EXISTS idx_human_actions_pending ON human_actions(project_id, status, kind);
 CREATE INDEX IF NOT EXISTS idx_decisions_workflow ON planner_decisions(workflow_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_events_v2_lookup ON events_v2(project_id, workitem_id, workflow_id, task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_events_lookup ON project_events(project_id, workitem_id, workflow_id, task_id, created_at);

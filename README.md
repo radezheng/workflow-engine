@@ -133,9 +133,9 @@ hwe status workflow.yaml
 hwe events workflow.yaml [--limit N]
 ```
 
-## V2 Project/WorkItem/Task Queue
+## Project/WorkItem/Task Queue
 
-V2 stores state in each project's `.engine/engine.db` and starts with project, work item, workflow, and task queue records. This is the persistence layer for the future planner and worker loop.
+Project workflow mode stores state in each project's `.engine/engine.db` and starts with project, work item, workflow, and task queue records. This is the persistence layer for the future planner and worker loop.
 
 ```bash
 hwe v2 project init my-project --id my-project

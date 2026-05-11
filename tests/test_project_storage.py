@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 
 from hermes_workflow_engine.cli import main
-from hermes_workflow_engine.v2_storage import V2Storage
+from hermes_workflow_engine.project_storage import ProjectStorage
 
 
-def test_v2_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
+def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     project_root = tmp_path / "alpha"
-    storage = V2Storage(project_root)
+    storage = ProjectStorage(project_root)
 
     project = storage.upsert_project("alpha")
     workitem = storage.create_workitem(
@@ -57,7 +57,7 @@ def test_v2_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     assert (project_root / ".engine" / "engine.db").exists()
 
 
-def test_v2_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> None:
+def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "cli-project"
 
     exit_code = main(["v2", "project", "init", str(project_root), "--id", "cli", "--name", "CLI Project"])

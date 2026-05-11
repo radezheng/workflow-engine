@@ -9,7 +9,7 @@ from .config import ConfigError, HWEConfig, configured_config_path, load_config,
 from .runtime import WorkflowRuntime
 from .spec import SpecError, load_workflow
 from .storage import Storage
-from .v2_storage import V2Storage, V2StorageError, resolve_project_root
+from .project_storage import ProjectStorage, ProjectStorageError, resolve_project_root
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,20 +40,20 @@ def main(argv: list[str] | None = None) -> int:
     config_init.add_argument("--default-workspace-root", default="~/workspaces/hermes")
     config_init.add_argument("--force", action="store_true", help="Overwrite an existing config file.")
 
-    v2_parser = subparsers.add_parser("v2", help="Manage V2 project/workitem/task state.")
+    v2_parser = subparsers.add_parser("v2", help="Manage project/workitem/task state.")
     v2_subparsers = v2_parser.add_subparsers(dest="v2_command", required=True)
 
-    v2_project = v2_subparsers.add_parser("project", help="Manage V2 projects.")
+    v2_project = v2_subparsers.add_parser("project", help="Manage projects.")
     v2_project_subparsers = v2_project.add_subparsers(dest="project_command", required=True)
-    v2_project_init = v2_project_subparsers.add_parser("init", help="Initialize V2 state for a project.")
+    v2_project_init = v2_project_subparsers.add_parser("init", help="Initialize state for a project.")
     v2_project_init.add_argument("project", help="Project name under default_workspace_root or an explicit path.")
     v2_project_init.add_argument("--id", dest="project_id", default=None)
     v2_project_init.add_argument("--name", default=None)
-    v2_project_show = v2_project_subparsers.add_parser("show", help="Show a V2 project record.")
+    v2_project_show = v2_project_subparsers.add_parser("show", help="Show a project record.")
     v2_project_show.add_argument("project")
     v2_project_show.add_argument("--id", dest="project_id", default=None)
 
-    v2_workitem = v2_subparsers.add_parser("workitem", help="Manage V2 work items.")
+    v2_workitem = v2_subparsers.add_parser("workitem", help="Manage work items.")
     v2_workitem_subparsers = v2_workitem.add_subparsers(dest="workitem_command", required=True)
     v2_workitem_create = v2_workitem_subparsers.add_parser("create", help="Create a work item.")
     v2_workitem_create.add_argument("project")
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     v2_workitem_list.add_argument("project")
     v2_workitem_list.add_argument("--project-id", default=None)
 
-    v2_workflow = v2_subparsers.add_parser("workflow", help="Manage V2 workflows.")
+    v2_workflow = v2_subparsers.add_parser("workflow", help="Manage workflows.")
     v2_workflow_subparsers = v2_workflow.add_subparsers(dest="workflow_command", required=True)
     v2_workflow_create = v2_workflow_subparsers.add_parser("create", help="Create a workflow for a work item.")
     v2_workflow_create.add_argument("project")
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     v2_workflow_create.add_argument("--project-id", default=None)
     v2_workflow_create.add_argument("--planner-profile", default=None)
 
-    v2_task = v2_subparsers.add_parser("task", help="Manage V2 tasks.")
+    v2_task = v2_subparsers.add_parser("task", help="Manage tasks.")
     v2_task_subparsers = v2_task.add_subparsers(dest="task_command", required=True)
     v2_task_create = v2_task_subparsers.add_parser("create", help="Create a task in a workflow.")
     v2_task_create.add_argument("project")
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     v2_task_complete.add_argument("task_id")
     v2_task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "waiting_for_info", "waiting_for_approval"])
 
-    v2_events = v2_subparsers.add_parser("events", help="Show V2 project events as JSON lines.")
+    v2_events = v2_subparsers.add_parser("events", help="Show project events as JSON lines.")
     v2_events.add_argument("project")
     v2_events.add_argument("--project-id", default=None)
     v2_events.add_argument("--limit", type=int, default=50)
@@ -158,8 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
-    except V2StorageError as exc:
-        print(f"v2 error: {exc}", file=sys.stderr)
+    except ProjectStorageError as exc:
+        print(f"project error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("canceled", file=sys.stderr)
@@ -208,7 +208,7 @@ def _handle_v2(args: argparse.Namespace) -> int:
     if args.v2_command == "task":
         return _handle_v2_task(args)
     if args.v2_command == "events":
-        storage = _v2_storage(args.project)
+        storage = _project_storage(args.project)
         project_id = args.project_id or Path(args.project).expanduser().name
         for event in storage.list_events(project_id, limit=args.limit):
             print(json.dumps(event, sort_keys=True))
@@ -217,7 +217,7 @@ def _handle_v2(args: argparse.Namespace) -> int:
 
 
 def _handle_v2_project(args: argparse.Namespace) -> int:
-    storage = _v2_storage(args.project)
+    storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.project_command == "init":
         name = args.name or project_id
@@ -230,7 +230,7 @@ def _handle_v2_project(args: argparse.Namespace) -> int:
 
 
 def _handle_v2_workitem(args: argparse.Namespace) -> int:
-    storage = _v2_storage(args.project)
+    storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.workitem_command == "create":
         _ensure_project(storage, project_id)
@@ -254,7 +254,7 @@ def _handle_v2_workitem(args: argparse.Namespace) -> int:
 
 
 def _handle_v2_workflow(args: argparse.Namespace) -> int:
-    storage = _v2_storage(args.project)
+    storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
     if args.workflow_command == "create":
         _print_json(storage.create_workflow(project_id, args.workitem_id, planner_profile=args.planner_profile))
@@ -263,7 +263,7 @@ def _handle_v2_workflow(args: argparse.Namespace) -> int:
 
 
 def _handle_v2_task(args: argparse.Namespace) -> int:
-    storage = _v2_storage(args.project)
+    storage = _project_storage(args.project)
     if args.task_command == "create":
         _print_json(
             storage.create_task(
@@ -295,15 +295,15 @@ def _handle_v2_task(args: argparse.Namespace) -> int:
     return 2
 
 
-def _v2_storage(project: str) -> V2Storage:
+def _project_storage(project: str) -> ProjectStorage:
     resolved_root = resolve_project_root(project)
-    return V2Storage(resolved_root)
+    return ProjectStorage(resolved_root)
 
 
-def _ensure_project(storage: V2Storage, project_id: str) -> None:
+def _ensure_project(storage: ProjectStorage, project_id: str) -> None:
     try:
         storage.get_project(project_id)
-    except V2StorageError:
+    except ProjectStorageError:
         storage.upsert_project(project_id, project_id=project_id)
 
 
