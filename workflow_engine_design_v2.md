@@ -45,7 +45,7 @@ A project is a real workspace folder with its own `.engine/` directory. It owns 
 Example:
 
 ```text
-examples/workspace/projects/todo-app/.engine/
+~/workspaces/hermes/todo-app/.engine/
 ```
 
 ### 4.2 Conversation

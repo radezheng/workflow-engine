@@ -40,20 +40,20 @@ PYTHONPATH=src python3 -m hermes_workflow_engine status examples/workflow.yaml
 PYTHONPATH=src python3 -m hermes_workflow_engine events examples/workflow.yaml
 ```
 
-Runtime files are written to `examples/workspace/projects/example/.engine/`.
+Runtime files are written to the example project's `.engine/` directory.
 
 ## Workspace And Project Layout
 
-For multiple projects, use `workflow.workspace` as the shared workspace root and `workflow.project` as the project folder under it:
+For multiple projects, use `workflow.workspace` as the shared workspace root and `workflow.project` as the project folder under it. For local Hermes dogfood and generated projects, use `~/workspaces/hermes` as the shared root so target projects live outside this engine repository:
 
 ```yaml
 workflow:
   id: my-project-flow
-  workspace: /path/to/hermes-workspace
-  project: projects/my-project
+  workspace: /Users/rade/workspaces/hermes
+  project: my-project
 ```
 
-All commands, Hermes profile invocations, output paths, validators, artifacts, and state then use `/path/to/hermes-workspace/projects/my-project` as the project workspace. That project gets its own `.engine/` directory, so progress is tracked independently per project. If `workflow.project` is omitted, the old single-project behavior is preserved and `workflow.workspace` itself is treated as the project workspace.
+All commands, Hermes profile invocations, output paths, validators, artifacts, and state then use `/Users/rade/workspaces/hermes/my-project` as the project workspace. That project gets its own `.engine/` directory, so progress is tracked independently per project. If `workflow.project` is omitted, the old single-project behavior is preserved and `workflow.workspace` itself is treated as the project workspace.
 
 ## Running A Real Hermes Profile Step
 
