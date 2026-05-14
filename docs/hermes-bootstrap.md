@@ -1,6 +1,8 @@
 # Hermes Bootstrap Guide For HWE
 
-Use this guide when a Hermes `default` profile needs to install HWE, install the HWE skill, and validate that the current environment matches the active HWE config.
+Use this guide when a Hermes `default` profile needs to install or update HWE, install the HWE skill, and validate that the current environment matches the active HWE config.
+
+Public repository: `https://github.com/radezheng/workflow-engine`
 
 ## 1. Locate Or Clone The HWE Repo
 
@@ -14,10 +16,20 @@ cd "$HWE_REPO"
 If installing from GitHub, clone the public repo first:
 
 ```bash
-git clone <public-hwe-repo-url> workflow-engine
-cd workflow-engine
-export HWE_REPO=$PWD
+export HWE_REPO=${HWE_REPO:-$HOME/workflow-engine}
+git clone https://github.com/radezheng/workflow-engine.git "$HWE_REPO"
+cd "$HWE_REPO"
 ```
+
+If updating an existing checkout, preserve local changes and only fast-forward:
+
+```bash
+cd "$HWE_REPO"
+git status --short
+git pull --ff-only
+```
+
+If `git status --short` shows local changes, stop and ask the user whether to commit, stash, or keep the local checkout unchanged.
 
 ## 2. Install HWE Locally
 
@@ -36,6 +48,14 @@ Verify the CLI:
 
 ```bash
 "$HWE" --help
+```
+
+After every HWE update, rerun the editable install so the CLI uses the latest source:
+
+```bash
+cd "$HWE_REPO"
+. .venv/bin/activate
+python -m pip install -e .
 ```
 
 ## 3. Create Or Select HWE Config
@@ -96,6 +116,18 @@ Doctor can apply only safe local fixes such as creating configured local directo
 ```
 
 Ask the user before changing credentials, ports, database/container lifecycle, schemas, profile commands, model switch commands, API/UI service lifecycle, or overwriting an existing profile-local skill.
+
+## Update Checklist
+
+Use this checklist when the user asks Hermes to update HWE:
+
+1. Set `HWE_REPO`, `HWE`, `HWE_PYTHON`, and `HWE_CONFIG`.
+2. Run `git status --short`; ask before touching local changes.
+3. Run `git pull --ff-only`.
+4. Reinstall with `python -m pip install -e .` inside `.venv`.
+5. Sync `.agents/skills/hwe/` into every Hermes profile skill directory that needs it.
+6. Run doctor and resolve `FAIL` findings before mutating workflow state.
+7. Restart `hwe serve` if the API is running and source/config changed.
 
 ## 6. Start Optional Local Console
 

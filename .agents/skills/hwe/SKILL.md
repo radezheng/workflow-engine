@@ -15,9 +15,50 @@ Use this skill when the user wants Hermes profiles to plan, implement, review, a
 
 HWE owns workflow state and scheduling. Hermes profiles are workers.
 
+Public HWE repository: `https://github.com/radezheng/workflow-engine`
+
 This `SKILL.md` is the operational entrypoint. Keep critical safety and workflow rules here; move bulky examples or rare maintenance guidance into supporting files such as [skill-maintenance](./references/skill-maintenance.md).
 
 Do not assume machine-specific paths, ports, workspace roots, model names, or database services. Discover them from `HWE_REPO`, `HWE_CONFIG`, the active `hwe.config.yaml`, command-line arguments, or the current repository.
+
+## Install Or Update HWE
+
+When the user asks to install, update, repair, or bootstrap HWE, use the public repository, then run doctor before mutating workflow state. Install into an operator-approved directory:
+
+```bash
+export HWE_REPO=${HWE_REPO:-$HOME/workflow-engine}
+git clone https://github.com/radezheng/workflow-engine.git "$HWE_REPO"
+cd "$HWE_REPO"
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+export HWE=$PWD/.venv/bin/hwe
+export HWE_PYTHON=$PWD/.venv/bin/python
+export HWE_CONFIG=${HWE_CONFIG:-$PWD/hwe.config.yaml}
+```
+
+Update an existing checkout only when it has no unresolved local changes; if `git status --short` shows local changes, ask whether to commit, stash, or keep them:
+
+```bash
+cd "$HWE_REPO"
+git status --short
+git pull --ff-only
+. .venv/bin/activate
+python -m pip install -e .
+```
+
+After install or update, sync the bundled skill into Hermes and run doctor:
+
+```bash
+mkdir -p "$HOME/.hermes/skills"
+rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' \
+  "$HWE_REPO/.agents/skills/hwe/" \
+  "$HOME/.hermes/skills/hwe/"
+"$HWE_PYTHON" "$HWE_REPO/.agents/skills/hwe/scripts/doctor.py" --repo "$HWE_REPO" --config "$HWE_CONFIG"
+```
+
+If HWE dispatches to multiple Hermes profiles, copy the full `hwe` skill directory into each target profile's configured skill directory and re-check discovery before running agent tasks.
 
 ## Operating Checkpoints
 

@@ -18,6 +18,13 @@ This is a local MVP implementation of the workflow engine described in [workflow
 
 ## Install For Local Development
 
+Clone the public repository:
+
+```bash
+git clone https://github.com/radezheng/workflow-engine.git
+cd workflow-engine
+```
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -31,6 +38,17 @@ PYTHONPATH=src python3 -m hermes_workflow_engine --help
 ```
 
 For Hermes `default` profile bootstrapping on a new machine, including installing HWE, copying the bundled HWE skill, and running config/environment self-checks, see [docs/hermes-bootstrap.md](docs/hermes-bootstrap.md).
+
+To update an existing checkout:
+
+```bash
+git status --short
+git pull --ff-only
+source .venv/bin/activate
+pip install -e .
+```
+
+If local changes are present, commit or stash them before updating.
 
 ## Try The Example
 
