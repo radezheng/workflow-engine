@@ -9,6 +9,35 @@ from hermes_workflow_engine.api import app
 from hermes_workflow_engine.project_storage import ProjectStorage
 
 
+def test_api_cors_allows_localhost_any_port() -> None:
+    client = TestClient(app)
+    for origin in ("http://127.0.0.1:5173", "http://localhost:3000", "http://[::1]:49152"):
+        response = client.options(
+            "/api/projects",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == origin
+        assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_api_cors_rejects_non_local_origin() -> None:
+    response = TestClient(app).options(
+        "/api/projects",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+
+
 def test_api_lists_ai_providers_and_assists(tmp_path: Path, monkeypatch) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
