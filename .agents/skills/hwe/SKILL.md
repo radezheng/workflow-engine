@@ -149,11 +149,25 @@ WORKFLOW_ID=$(hwe workflow create <project> "$WORKITEM_ID" \
   --planner-profile designer \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-hwe task create <project> "$WORKFLOW_ID" "Plan and dispatch" \
+PLAN_TASK_ID=$(hwe task create <project> "$WORKFLOW_ID" "Plan workitem" \
   --kind design \
   --profile designer \
   --skill hwe \
-  --prompt-text "Plan the workitem, write requirements/design if needed, create focused implementation, review, and runtime smoke tasks."
+  --prompt-template-ref designer/workitem-plan \
+  --prompt-text "Plan the workitem. Do not create implementation/review tasks in this planning task; a follow-up task-breakdown task will read this run's stdout path and create the HWE task graph." \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+After the planning task succeeds, do not manually transcribe the plan text into implementation tasks. Create one follow-up task-breakdown task, pass the planning run's `stdout.log` path in `--prompt-text`, and run that task so it creates the task graph through HWE commands:
+
+```bash
+hwe task create <project> "$WORKFLOW_ID" "Break down plan into HWE tasks" \
+  --kind design \
+  --profile designer \
+  --depends-on "$PLAN_TASK_ID" \
+  --skill hwe \
+  --prompt-template-ref designer/task-breakdown \
+  --prompt-text "Read plan stdout at <absolute-path-to-stdout.log>. Create the executable HWE task graph for workflow $WORKFLOW_ID using hwe task create. Do not only describe tasks in prose."
 ```
 
 Then run ready tasks with the push-style runner:
@@ -171,14 +185,14 @@ Auto-run is allowed only when the ready task queue is already clear and each tas
 When the workitem is software project development and the remote user talks only to the `default` profile, use this flow instead of improvising step by step:
 
 1. **Intake**: Resolve or create the project/workitem/workflow. Summarize the requested behavior, constraints, external services, ports, data retention, and acceptance criteria. If any of these are unclear, ask the user or create `waiting_for_info` before implementation.
-2. **Design**: Create or run one planning/design task that produces a short technical plan: target files, architecture choices, risks, test strategy, and task breakdown. Use `designer` only if HWE will actually route that profile and its required skills are verified; otherwise use `default` and record the same outputs.
-3. **Task Queue**: Materialize a concrete queue from the plan. Prefer several narrow `impl`/`fix` tasks, deterministic `command` checks, `http_check` smoke tests for runnable apps, and final review/acceptance tasks. Every implementation task should name intended files, constraints, dependencies, and verification.
+2. **Design**: Create or run one planning/design task that produces a short technical plan: target files, architecture choices, risks, test strategy, and draft task candidates. Use `designer` only if HWE will actually route that profile and its required skills are verified; otherwise use `default` and record the same outputs. Planning/design tasks must not be treated as the executable queue.
+3. **Task Queue**: Materialize a concrete queue through a dedicated `task-breakdown` task that receives the successful plan run's `stdout.log` path and creates HWE task records with `hwe task create`. Do not have the default coordinator manually parse/transcribe planner prose into tasks except under explicit owner direction for recovery. Prefer several narrow `impl`/`fix` tasks, deterministic `command` checks, `http_check` smoke tests for runnable apps, and final review/acceptance tasks. Every implementation task should name intended files, constraints, dependencies, and verification.
 4. **Implementation Slices**: Run one narrow implementation task at a time. Do not combine broad product design, coding, review, and smoke testing in one prompt. After each slice, run its nearest deterministic check or create the next fix task.
 5. **Integration And Smoke**: For runnable apps, add explicit startup/build/test tasks and at least one deterministic runtime smoke task before final acceptance. Use real localhost ports and project-local environments.
 6. **Review And Acceptance**: Review code, tests, and run artifacts. If gaps remain, create focused fix tasks. Mark obsolete duplicates `superseded`; do not delete history. Complete the workitem only after acceptance criteria and smoke evidence are satisfied.
 7. **Reporting**: Report project/workitem/workflow/task IDs, run IDs, evidence paths, commands, and final status. Mention any pending human actions or residual risks.
 
-Default-profile orchestration rule: the `default` profile may coordinate the whole workflow, but it should not pretend separate profiles ran work they did not run. If dispatching to `designer`, `coder`, `reviewer`, or `qa`, first verify that HWE config contains those profiles, the required prompt templates exist, and each target profile has the required skills. If not dispatching, task records should use `default` or omit `--profile` and still follow the same design/implementation/check/review phases.
+Default-profile orchestration rule: the `default` profile may coordinate the whole workflow, but it should not pretend separate profiles ran work they did not run. If dispatching to `designer`, `coder`, `reviewer`, or `qa`, first verify that HWE config contains those profiles, the required prompt templates exist, and each target profile has the required skills. If not dispatching, task records should use `default` or omit `--profile` and still follow the same design/task-breakdown/implementation/check/review phases. In both modes, do not skip the task-breakdown step by manually converting a designer stdout plan into tasks from the coordinator chat.
 
 ## Choosing Profiles And Templates
 
@@ -226,7 +240,8 @@ PY
 
 Template selection rules:
 
-- Planning/design tasks: use `designer/workitem-plan`, `designer/technical-design`, or `designer/task-breakdown` when present.
+- Planning/design tasks: use `designer/workitem-plan` or `designer/technical-design` when present; these produce evidence and draft task candidates, not the executable task queue.
+- Task graph materialization: use `designer/task-breakdown` after a planning/design task succeeds, pass the plan `stdout.log` path, and require the worker to create HWE task records through CLI/API operations.
 - Implementation tasks: use `coder/implementation-slice`; fixes use `coder/fix-slice`.
 - Review/acceptance tasks: use `reviewer/implementation-review` or `reviewer/acceptance-review`.
 - QA/test planning: use `qa/test-plan` or `qa/regression-review` when present.

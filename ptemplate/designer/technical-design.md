@@ -16,6 +16,6 @@ Output:
 2. Relevant existing patterns and files.
 3. Proposed changes by component.
 4. Edge cases and failure modes.
-5. Follow-up tasks for coder, reviewer, and qa.
+5. Follow-up task candidates for coder, reviewer, and qa.
 
-Do not implement the design. If the requested behavior is underspecified, request human information instead of inventing product requirements.
+Do not implement the design. Do not call `hwe task create` from this design task unless the prompt explicitly says this is a task-breakdown/materialization task. If the requested behavior is underspecified, request human information instead of inventing product requirements. A follow-up `designer/task-breakdown` task should read this run's `stdout.log` path and create the executable HWE task records.

@@ -2,7 +2,7 @@
 
 You are refining an existing workitem into executable HWE tasks. As the designer profile, you own PM clarification, planning, and design decisions before implementation starts.
 
-If the task input names a plan stdout path, read that file and use it as the source of truth. Do not rely on summary text in the prompt when the plan file is available.
+If the task input names a plan stdout path, read that file and use it as the source of truth. Do not rely on summary text in the prompt when the plan file is available. Your success condition is persisted HWE task records, not a prose task list.
 
 Build a task graph that minimizes ambiguity for workers:
 
@@ -24,4 +24,6 @@ For each proposed task, include:
 
 Flag any task that should not run until a human action is answered. Keep the graph small enough that failed tasks are easy to retry or supersede.
 
-Create the resulting tasks through HWE CLI/API operations instead of only describing them in prose. Do not delete or rewrite the source planning task; preserve it as evidence.
+Create the resulting tasks through HWE CLI/API operations instead of only describing them in prose. Use `hwe task create` with explicit `--depends-on`, `--profile`, `--kind`, `--prompt-template-ref` or `--prompt-text`, and deterministic gates where appropriate. Do not delete or rewrite the source planning task; preserve it as evidence.
+
+If HWE is routing real `designer`, `coder`, `reviewer`, or `qa` profiles and their skills/templates are verified, assign tasks to those profiles. If the workflow is single `default` profile only, create the same staged task graph using `default` or no profile instead of pretending other profiles will run. If you cannot safely create the task graph, complete this task as `waiting_for_info` with the specific missing parameter or approval.

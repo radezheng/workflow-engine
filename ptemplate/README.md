@@ -26,9 +26,9 @@ Assistant form-drafting templates:
 
 Worker role templates:
 
-- `designer/workitem-plan.md`: turn a workitem into an execution strategy.
+- `designer/workitem-plan.md`: turn a workitem into an execution strategy and draft task candidates without creating the executable queue.
 - `designer/task-breakdown.md`: read a plan file and create/refine an HWE task graph with roles, dependencies, and gates.
-- `designer/technical-design.md`: produce implementation design without editing code.
+- `designer/technical-design.md`: produce implementation design and draft follow-up task candidates without editing code or creating the executable queue.
 - `coder/implementation-slice.md`: implement one focused feature slice.
 - `coder/fix-slice.md`: repair one specific failure with minimal blast radius.
 - `reviewer/implementation-review.md`: review implementation risk and regressions.
