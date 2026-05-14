@@ -14,6 +14,7 @@ Before installing or changing HWE, confirm any parameter that is not already exp
 - Local `HWE_CONFIG` path and whether to create a new config or reuse an existing one.
 - `default_workspace_root` for generated/managed projects.
 - Project storage backend: SQLite or an owner-approved PostgreSQL service.
+- Current Hermes profile provider details for HWE `ai_providers`: OpenAI-compatible base URL, model, timeout, and secret environment variable if needed.
 - Hermes user skill directory and any per-profile skill directories that also need the `hwe` skill.
 - Whether existing skill directories may be overwritten by the public repo copy.
 - API/UI host and ports if starting the console.
@@ -83,6 +84,26 @@ export HWE_CONFIG=/path/to/hwe.config.yaml
 ```
 
 Machine-specific values belong in `hwe.config.yaml` or environment variables: workspace root, prompt template root, project database settings, profile commands, model switch commands, healthcheck URLs, and provider secrets.
+
+Use [docs/hwe.config.example.yaml](hwe.config.example.yaml) as the starting example when the owner wants a full config shape.
+
+### AI Provider Mapping During Bootstrap
+
+HWE `ai_providers` are for UI assistant drafting of projects, workitems, prompt templates, and human-action responses. They do not route worker tasks and they do not need to mirror HWE profiles.
+
+When bootstrapping from an existing Hermes profile, inspect or ask for the current profile's provider. If it is OpenAI-compatible, copy that provider into `hwe.config.yaml` as a single `ai_providers` entry:
+
+```yaml
+ai_providers:
+  current-profile:
+    type: openai_compatible
+    base_url: http://127.0.0.1:1234/v1
+    model: model-from-current-hermes-profile
+    # api_key_env: OPENAI_API_KEY
+    timeout_seconds: 60
+```
+
+If the current Hermes profile has only one provider, create only one HWE provider. Do not invent separate `designer`, `coder`, or `reviewer` AI providers just because those worker profiles exist. Add multiple HWE `ai_providers` only when the owner explicitly provides multiple distinct OpenAI-compatible providers, such as one local endpoint and one hosted endpoint. If the current profile's provider is hidden, not OpenAI-compatible, or uses credentials the agent cannot read safely, ask the owner for the HWE provider values instead of guessing.
 
 ## 4. Install The HWE Skill Into Hermes
 

@@ -1,0 +1,60 @@
+# Example local HWE config. Copy to hwe.config.yaml and adjust for the owner-approved machine.
+# Keep real secrets out of tracked files; use *_env keys for shared examples.
+
+default_workspace_root: ~/workspaces/hermes
+# This relative path assumes the example has been copied to the HWE repo root as
+# hwe.config.yaml. If you use a config elsewhere, adjust it relative to that file.
+prompt_template_root: ./ptemplate
+
+# SQLite project storage is the default when project_database is omitted.
+# Use PostgreSQL only when the owner approves the service, credentials, and schema.
+# project_database:
+#   backend: postgres
+#   host: 127.0.0.1
+#   port: 5432
+#   database: hwe_db
+#   user: hwe_user
+#   schema: hwe
+#   password_env: HWE_PROJECT_DB_PASSWORD
+#   gssencmode: disable
+#   maxconn: 5
+
+# HWE ai_providers power UI assistant drafting. During bootstrap, copy the current
+# Hermes profile's OpenAI-compatible provider here when available. If the current
+# profile has only one provider, create one HWE provider entry; do not create one
+# per HWE worker profile unless the owner explicitly provides distinct providers.
+ai_providers:
+  current-profile:
+    type: openai_compatible
+    base_url: http://127.0.0.1:1234/v1
+    model: model-from-current-hermes-profile
+    # api_key_env: OPENAI_API_KEY
+    timeout_seconds: 60
+
+profiles:
+  designer:
+    hermes_profile: designer
+    hermes_command: designer
+    hermes_args: [--accept-hooks]
+    timeout_seconds: 600
+    healthcheck:
+      url: http://127.0.0.1:1234/v1/chat/completions
+      model: designer-model
+
+  coder:
+    hermes_profile: coder
+    hermes_command: coder
+    hermes_args: [--accept-hooks]
+    success_exit_codes: [0]
+    healthcheck:
+      url: http://127.0.0.1:1234/v1/chat/completions
+      model: coder-model
+
+  reviewer:
+    hermes_profile: reviewer
+    hermes_command: reviewer
+    hermes_args: [--accept-hooks]
+    timeout_seconds: 600
+    healthcheck:
+      url: http://127.0.0.1:1234/v1/chat/completions
+      model: reviewer-model

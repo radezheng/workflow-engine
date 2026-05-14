@@ -21,45 +21,11 @@ This `SKILL.md` is the operational entrypoint. Keep critical safety and workflow
 
 Do not assume machine-specific paths, ports, workspace roots, model names, or database services. Discover them from `HWE_REPO`, `HWE_CONFIG`, the active `hwe.config.yaml`, command-line arguments, or the current repository.
 
-## Install Or Update HWE
+## Bootstrap And Maintenance
 
-When the user asks to install, update, repair, or bootstrap HWE, use the public repository as the source of truth, then run doctor before mutating workflow state. Do not keep or use an unversioned local copy as the install source. Before changing the machine, confirm any missing owner parameters: install directory, `HWE_CONFIG` path, workspace root, storage backend, Hermes skill directories, permission to overwrite existing skill copies, console ports, and whether to run/clean up smoke tests.
+Install, update, skill sync, and doctor self-check are rare maintenance flows. When the user asks for them, follow `$HWE_REPO/docs/hermes-bootstrap.md` from the public repository instead of relying on inline snippets in this skill. That guide is for Hermes agents: it treats `https://github.com/radezheng/workflow-engine` as the source of truth, asks the owner to confirm install/config/skill parameters before mutation, and includes a full `hwe.config.yaml` example.
 
-```bash
-export HWE_REPO=${HWE_REPO:-$HOME/workflow-engine}
-git clone https://github.com/radezheng/workflow-engine.git "$HWE_REPO"
-cd "$HWE_REPO"
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-export HWE=$PWD/.venv/bin/hwe
-export HWE_PYTHON=$PWD/.venv/bin/python
-export HWE_CONFIG=${HWE_CONFIG:-$PWD/hwe.config.yaml}
-```
-
-Update an existing checkout only when `origin` points to the public repo and it has no unresolved local changes; otherwise ask the owner how to proceed:
-
-```bash
-cd "$HWE_REPO"
-git remote get-url origin
-git status --short
-git pull --ff-only
-. .venv/bin/activate
-python -m pip install -e .
-```
-
-After install or update, sync the bundled skill into Hermes and run doctor:
-
-```bash
-mkdir -p "$HOME/.hermes/skills"
-rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' \
-  "$HWE_REPO/.agents/skills/hwe/" \
-  "$HOME/.hermes/skills/hwe/"
-"$HWE_PYTHON" "$HWE_REPO/.agents/skills/hwe/scripts/doctor.py" --repo "$HWE_REPO" --config "$HWE_CONFIG"
-```
-
-If HWE dispatches to multiple Hermes profiles, copy the full `hwe` skill directory into each owner-approved target profile skill directory and re-check discovery before running agent tasks.
+During bootstrap, map the current Hermes profile's OpenAI-compatible provider into one HWE `ai_providers` entry for UI assistant drafting. If the current profile has only one provider, create one HWE provider; do not invent separate providers for `designer`, `coder`, or `reviewer` unless the owner explicitly provides distinct provider settings.
 
 ## Operating Checkpoints
 
@@ -138,32 +104,7 @@ If `project_database.backend: postgres` is configured, use the configured databa
 
 ## HWE Doctor
 
-When the user invokes `/hwe doctor`, asks why HWE projects disappeared, reports profile/template/config mismatch, or asks to validate a new environment, run the bundled doctor workflow before making workflow changes.
-
-Doctor checks should inspect:
-
-- HWE repo discovery and `HWE_CONFIG` resolution.
-- Whether the `hwe` command or repo virtualenv command is executable.
-- Whether `hwe.config.yaml` loads and validates.
-- `default_workspace_root` and `prompt_template_root` existence.
-- Project database backend, Postgres reachability/login when configured, and missing credential environment variables.
-- Configured profiles, `hermes_command`, switch command executables, healthcheck URLs, and `success_exit_codes` shape.
-- AI provider base URLs and secret environment variables.
-- Prompt templates and target-profile skill availability before creating agent tasks.
-
-Run the bundled script from this skill directory when available:
-
-```bash
-"${HWE_PYTHON:-python3}" scripts/doctor.py --repo "${HWE_REPO:-$PWD}" --config "${HWE_CONFIG:-${HWE_REPO:-$PWD}/hwe.config.yaml}"
-```
-
-Use `--fix` only for safe local fixes such as creating configured local directories:
-
-```bash
-"${HWE_PYTHON:-python3}" scripts/doctor.py --repo "${HWE_REPO:-$PWD}" --config "${HWE_CONFIG:-${HWE_REPO:-$PWD}/hwe.config.yaml}" --fix
-```
-
-Doctor may auto-fix reversible local mismatches. It must ask the user before changing credentials, ports, database/container lifecycle, schemas, profile commands, model switch commands, API/UI service lifecycle, or overwriting an existing profile-local skill. Report findings as `OK`, `WARN`, and `FAIL`, include the exact config path and repo path used, and list any changes made.
+When the user invokes `/hwe doctor`, asks why HWE projects disappeared, reports profile/template/config mismatch, or asks to validate a new environment, follow `$HWE_REPO/docs/hermes-bootstrap.md#5-run-hwe-doctor` and run the bundled doctor before making workflow changes. Doctor reports `OK`, `WARN`, and `FAIL` findings for repo/config discovery, project database reachability, profiles, healthchecks, prompt templates, target-profile skills, and AI providers. Use `--fix` only for safe local directory creation; ask before changing credentials, ports, database/container lifecycle, schemas, profile commands, model switch commands, API/UI service lifecycle, or existing profile-local skills.
 
 ## API And UI Console
 

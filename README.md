@@ -39,6 +39,8 @@ PYTHONPATH=src python3 -m hermes_workflow_engine --help
 
 For Hermes `default` profile bootstrapping, including owner-confirmed install/update parameters, copying the bundled HWE skill, and running config/environment self-checks, see [docs/hermes-bootstrap.md](docs/hermes-bootstrap.md).
 
+For a full local config shape, see [docs/hwe.config.example.yaml](docs/hwe.config.example.yaml).
+
 To update an existing checkout:
 
 ```bash
@@ -152,6 +154,8 @@ ai_providers:
 ```
 
 The UI lists configured providers and sends multi-turn assistant requests through HWE's API. When drafting a new workitem from a selected project, HWE includes a compact project context with existing workitems, current workflow IDs, task status counts, and recent task titles. Use `api_key_env` for hosted providers; do not store API keys directly in tracked files.
+
+During Hermes bootstrap, use the current Hermes profile's OpenAI-compatible provider as the first HWE `ai_providers` entry when available. If the current profile has only one provider, configure one HWE provider; `ai_providers` are for UI drafting and do not need one entry per worker profile.
 
 Then a workflow can specify only the project name:
 

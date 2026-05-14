@@ -65,7 +65,7 @@ Important design rules:
 - `tests/test_api.py`: FastAPI endpoint tests. Keep tests local and free of external services.
 - `ui/`: Vite React TypeScript console. Keep `App.tsx` as orchestration and split menu items, panels, rows, and shared widgets into modules under `ui/src/components/`.
 
-Public repository: `https://github.com/radezheng/workflow-engine`. For Hermes/default-profile bootstrapping, install or update from that repo as the source of truth, confirm owner parameters before changing install/config/skill locations, reinstall with `pip install -e .`, sync `.agents/skills/hwe/` into approved Hermes skill directories, then run doctor before mutating workflow state. Detailed steps live in `docs/hermes-bootstrap.md`.
+Public repository: `https://github.com/radezheng/workflow-engine`. For Hermes/default-profile bootstrapping, install or update from that repo as the source of truth, confirm owner parameters before changing install/config/skill locations, map the current Hermes profile's provider into HWE `ai_providers` when available, reinstall with `pip install -e .`, sync `.agents/skills/hwe/` into approved Hermes skill directories, then run doctor before mutating workflow state. Detailed steps and the config example live in `docs/hermes-bootstrap.md` and `docs/hwe.config.example.yaml`.
 
 ## Current Project Workflow Capabilities
 
