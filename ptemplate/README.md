@@ -26,9 +26,9 @@ Assistant form-drafting templates:
 
 Worker role templates:
 
-- `designer/workitem-plan.md`: turn a workitem into an execution strategy and draft task candidates without creating the executable queue.
-- `designer/task-breakdown.md`: read a plan file and create/refine an HWE task graph with roles, dependencies, and gates.
-- `designer/technical-design.md`: produce implementation design and draft follow-up task candidates without editing code or creating the executable queue.
+- `designer/workitem-plan.md`: 用中文梳理 workitem，区分新项目/已有项目，提出 research/design/task 候选，但不创建可执行队列。
+- `designer/task-breakdown.md`: 用中文读取 plan/design 文件，把任务候选物化为 HWE Task 记录，并验证 profile/template 选择。
+- `designer/technical-design.md`: 用中文产出技术设计；已有项目先做只读 research，再给任务候选、profile 分配和 template 建议。
 - `coder/implementation-slice.md`: implement one focused feature slice.
 - `coder/fix-slice.md`: repair one specific failure with minimal blast radius.
 - `reviewer/implementation-review.md`: review implementation risk and regressions.
@@ -36,7 +36,7 @@ Worker role templates:
 - `reviewer/runtime-smoke.md`: runtime smoke review for runnable applications.
 - `qa/test-plan.md`: design deterministic test and smoke coverage.
 - `qa/regression-review.md`: check for behavior regressions around touched surfaces.
-- `researcher/source-research.md`: gather codebase context before implementation.
+- `researcher/source-research.md`: 用中文做已有项目的只读源码/文档研究，为 technical design 和任务拆分提供事实依据。
 - `operator/recovery-plan.md`: plan task release, retry, skip, or supersede recovery.
 
 The historical `planner/` templates remain compatible for existing projects, but new PM, planning, and design tasks should use the `designer` profile. The `reviewer` profile should stay focused on implementation review, QA review, and acceptance evidence.

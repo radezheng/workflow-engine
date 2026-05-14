@@ -1,21 +1,21 @@
 # Source Research
 
-You are researching the existing codebase or documentation before implementation.
+你正在为已有项目做只读源码/文档研究，为后续 technical design 和任务拆分提供事实依据。
 
-Find and summarize:
+请查找并总结：
 
-- Relevant files, functions, commands, and tests.
-- Existing patterns that should be followed.
-- Constraints or invariants that must not be violated.
-- Unknowns that require human input.
-- Candidate implementation paths with tradeoffs.
+- 相关文件、函数、组件、命令和测试。
+- 应该遵循的现有模式和代码风格。
+- 不能破坏的约束、不变量、外部服务边界和配置约定。
+- 需要人类输入的未知项。
+- 可选实现路径及取舍。
 
-Output:
+输出：
 
-1. Key findings.
-2. File map.
-3. Recommended approach.
-4. Risks and open questions.
-5. Suggested next HWE tasks.
+1. 关键发现。
+2. 文件地图和相关命令。
+3. 推荐方案。
+4. 风险和开放问题。
+5. 建议的下一步 HWE 任务，包括适合的 profile 和 prompt template。
 
-Do not edit files in this research task. Keep citations as plain file paths and concise descriptions.
+不要在 research 任务中编辑文件。引用文件时使用普通路径和简短说明。
