@@ -5,10 +5,18 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 from hermes_workflow_engine.cli import main
 from hermes_workflow_engine.config import HWEConfig
 from hermes_workflow_engine.project_runtime import ProjectRuntime
 from hermes_workflow_engine.project_storage import ProjectStorage
+
+
+@pytest.fixture(autouse=True)
+def isolate_local_hwe_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HWE_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
 
 
 def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
@@ -22,14 +30,6 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
         requirements="Support Markdown notes.",
         acceptance=["Create notes", "Preview Markdown"],
     )
-    template = storage.create_role_prompt_template(
-        project["id"],
-        "reviewer",
-        "implementation-review",
-        "Check correctness, tests, security, and regression risk.",
-        description="Default reviewer best practices",
-        tags=["review", "best-practices"],
-    )
     workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
     first_task = storage.create_task(
         workflow["id"],
@@ -37,7 +37,7 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
         kind="design",
         profile="reviewer",
         skills=["hermes-project-workflow"],
-        prompt_template_id=template["id"],
+        prompt_template_ref="reviewer/implementation-review",
     )
     second_task = storage.create_task(
         workflow["id"],
@@ -51,9 +51,9 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
 
     assert first_task["status"] == "ready"
     assert first_task["skills"] == ["hermes-project-workflow"]
-    assert first_task["prompt_template_id"] == template["id"]
+    assert first_task["prompt_template_ref"] == "reviewer/implementation-review"
     assert second_task["status"] == "pending"
-    assert storage.list_role_prompt_templates(project["id"], role="reviewer")[0]["tags"] == ["review", "best-practices"]
+    assert storage.list_workitems(project["id"])[0]["status"] == "in_progress"
 
     claimed = storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="reviewer")
     assert claimed is not None
@@ -61,6 +61,7 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     assert claimed["status"] == "claimed"
     assert claimed["attempt"] == 1
     assert claimed["claim_id"].startswith("claim_")
+    assert storage.list_workitems(project["id"])[0]["status"] == "in_progress"
 
     completed = storage.complete_task(first_task["id"])
     assert completed["status"] == "succeeded"
@@ -70,6 +71,10 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     assert tasks[second_task["id"]]["status"] == "ready"
     assert tasks[second_task["id"]]["outputs"] == ["backend/notes.py"]
     assert tasks[second_task["id"]]["gates"] == ["python_syntax_ok"]
+    assert storage.list_workitems(project["id"])[0]["status"] == "in_progress"
+
+    storage.complete_task(second_task["id"])
+    assert storage.list_workitems(project["id"])[0]["status"] == "succeeded"
 
     events = storage.list_events(project["id"])
     event_types = [event["type"] for event in events]
@@ -77,6 +82,21 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     assert "task_ready" in event_types
     assert "task_completed" in event_types
     assert (project_root / ".engine" / "engine.db").exists()
+
+
+def test_list_workitems_orders_newest_first(tmp_path: Path) -> None:
+    project_root = tmp_path / "ordered-workitems"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("ordered-workitems")
+    older = storage.create_workitem(project["id"], "Older workitem")
+    newer = storage.create_workitem(project["id"], "Newer workitem")
+    with storage.connect() as connection:
+        connection.execute("UPDATE workitems SET created_at=? WHERE id=?", ("2026-01-01T00:00:00+00:00", older["id"]))
+        connection.execute("UPDATE workitems SET created_at=? WHERE id=?", ("2026-01-02T00:00:00+00:00", newer["id"]))
+
+    items = storage.list_workitems(project["id"])
+
+    assert [item["id"] for item in items] == [newer["id"], older["id"]]
 
 
 def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> None:
@@ -92,63 +112,41 @@ def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> Non
     assert (project_root / ".engine" / "engine.db").exists()
 
 
-def test_prompt_template_cli_creates_template(tmp_path: Path, capsys) -> None:
-    project_root = tmp_path / "template-project"
-    assert main(["project", "init", str(project_root), "--id", "template-project"]) == 0
+def test_project_archive_and_restore_hides_from_default_list(tmp_path: Path) -> None:
+    project_root = tmp_path / "archive-project"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("Archive Project", project_id="archive-project")
+
+    archived = storage.archive_project(project["id"])
+
+    assert archived["status"] == "archived"
+    assert storage.list_projects() == []
+    assert storage.list_projects(include_archived=True)[0]["id"] == project["id"]
+    event_types = [event["type"] for event in storage.list_events(project["id"])]
+    assert "project_archived" in event_types
+
+    restored = storage.restore_project(project["id"])
+
+    assert restored["status"] == "active"
+    assert storage.list_projects()[0]["id"] == project["id"]
+    event_types = [event["type"] for event in storage.list_events(project["id"])]
+    assert "project_restored" in event_types
+
+
+def test_project_archive_restore_cli(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "cli-archive-project"
+
+    assert main(["project", "init", str(project_root), "--id", "cli-archive", "--name", "CLI Archive"]) == 0
     capsys.readouterr()
+    assert main(["project", "archive", str(project_root), "--id", "cli-archive"]) == 0
+    archived = json.loads(capsys.readouterr().out)
 
-    exit_code = main(
-        [
-            "prompt-template",
-            "create",
-            str(project_root),
-            "reviewer",
-            "qa-review",
-            "--project-id",
-            "template-project",
-            "--body",
-            "Reject missing tests and unsafe changes.",
-            "--tag",
-            "qa",
-        ]
-    )
+    assert archived["status"] == "archived"
 
-    assert exit_code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["role"] == "reviewer"
-    assert payload["name"] == "qa-review"
-    assert payload["body_md"] == "Reject missing tests and unsafe changes."
-    assert payload["tags"] == ["qa"]
+    assert main(["project", "restore", str(project_root), "--id", "cli-archive"]) == 0
+    restored = json.loads(capsys.readouterr().out)
 
-
-def test_prompt_template_cli_uses_hwe_template_root(tmp_path: Path, capsys, monkeypatch) -> None:
-    hwe_root = tmp_path / "hwe"
-    template_root = hwe_root / "ptemplate"
-    template_dir = template_root / "reviewer"
-    template_dir.mkdir(parents=True)
-    (template_dir / "qa-review.md").write_text("Review for correctness and regression risk.", encoding="utf-8")
-    (hwe_root / "hwe.config.yaml").write_text("prompt_template_root: ./ptemplate\n", encoding="utf-8")
-    monkeypatch.chdir(hwe_root)
-
-    project_root = tmp_path / "template-project"
-    assert main(["project", "init", str(project_root), "--id", "template-project"]) == 0
-    capsys.readouterr()
-
-    exit_code = main(
-        [
-            "prompt-template",
-            "create",
-            str(project_root),
-            "reviewer",
-            "qa-review",
-            "--project-id",
-            "template-project",
-        ]
-    )
-
-    assert exit_code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["body_md"] == "Review for correctness and regression risk."
+    assert restored["status"] == "active"
 
 
 def test_task_waiting_for_info_creates_human_action_and_answer_resumes(tmp_path: Path) -> None:
@@ -255,6 +253,49 @@ def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
     assert summary.blocked == []
     assert (project_root / "marker.txt").read_text(encoding="utf-8") == "ok"
     assert storage.get_task(task["id"])["status"] == "succeeded"
+    run = storage.list_task_runs(task_id=task["id"])[0]
+    assert Path(run["stdout_path"]).exists()
+    assert Path(run["stderr_path"]).exists()
+    event_types = [event["type"] for event in storage.list_events(project["id"])]
+    assert "workitem_run_requested" in event_types
+    assert "workitem_run_completed" in event_types
+
+
+def test_project_runtime_runs_specific_ready_task(tmp_path: Path) -> None:
+    project_root = tmp_path / "specific-task-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("specific-task-runtime")
+    workitem = storage.create_workitem(project["id"], "Run selected task")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    first = storage.create_task(workflow["id"], "First ready", kind="command", profile="command", prompt_text="python3 -c \"from pathlib import Path; Path('first.txt').write_text('first', encoding='utf-8')\"", priority=10)
+    second = storage.create_task(workflow["id"], "Second ready", kind="command", profile="command", prompt_text="python3 -c \"from pathlib import Path; Path('second.txt').write_text('second', encoding='utf-8')\"", priority=20)
+
+    summary = ProjectRuntime(storage).run_one_task(project["id"], second["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert storage.get_task(first["id"])["status"] == "ready"
+    assert storage.get_task(second["id"])["status"] == "succeeded"
+    assert not (project_root / "first.txt").exists()
+    assert (project_root / "second.txt").read_text(encoding="utf-8") == "second"
+    event_types = [event["type"] for event in storage.list_events(project["id"])]
+    assert "task_run_requested" in event_types
+    assert "task_run_completed" in event_types
+
+
+def test_project_runtime_records_no_ready_task_event(tmp_path: Path) -> None:
+    project_root = tmp_path / "runtime-no-ready"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("runtime-no-ready")
+    workitem = storage.create_workitem(project["id"], "No ready work")
+    storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+
+    summary = ProjectRuntime(storage).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 0
+    events = storage.list_events(project["id"])
+    no_ready = [event for event in events if event["type"] == "workitem_run_no_ready_task"][-1]
+    assert no_ready["payload"]["tasks_started"] == 0
 
 
 def test_project_runtime_runs_http_check_task(tmp_path: Path) -> None:
@@ -271,7 +312,8 @@ def test_project_runtime_runs_http_check_task(tmp_path: Path) -> None:
             self.send_response(404)
             self.end_headers()
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, *args: object) -> None:
+            _ = args
             return
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -408,14 +450,16 @@ def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) ->
     storage = ProjectStorage(project_root)
     project = storage.upsert_project("agent-runtime")
     workitem = storage.create_workitem(project["id"], "Design notes", requirements="Support Markdown notes.", constraints="Keep existing behavior.")
-    template = storage.create_role_prompt_template(project["id"], "reviewer", "design-review", "Review design scope carefully.")
+    template_path = project_root / ".engine" / "prompt-templates" / "reviewer" / "design-review.md"
+    template_path.parent.mkdir(parents=True)
+    template_path.write_text("Review design scope carefully.", encoding="utf-8")
     workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
     task = storage.create_task(
         workflow["id"],
         "Draft design",
         kind="design",
         profile="reviewer",
-        prompt_template_id=template["id"],
+        prompt_template_ref="reviewer/design-review",
         prompt_text="Produce docs/design.md.",
         skills=["hermes-project-workflow"],
         outputs=["docs/design.md"],
@@ -428,6 +472,11 @@ def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) ->
     assert summary["tasks_succeeded"] == 1
     assert storage.get_task(task["id"])["status"] == "succeeded"
     run_started = [event for event in storage.list_events(project["id"]) if event["type"] == "task_run_started"][-1]
+    assert run_started["run_id"] == run_started["payload"]["run_id"]
+    run = storage.get_task_run(run_started["payload"]["run_id"])
+    assert Path(run["stdout_path"]).exists()
+    assert Path(run["stderr_path"]).exists()
+    assert Path(run["prompt_path"]).exists()
     prompt = project_root / ".engine" / "runs" / run_started["payload"]["run_id"] / "prompt.md"
     prompt_text = prompt.read_text(encoding="utf-8")
     assert "Review design scope carefully." in prompt_text
@@ -472,3 +521,199 @@ def test_project_runtime_runs_profile_switch_before_agent(tmp_path: Path) -> Non
     assert storage.get_task(task["id"])["status"] == "succeeded"
     assert switch_marker.read_text(encoding="utf-8") == "switched"
     assert (project_root / "hermes_invoked.txt").read_text(encoding="utf-8").startswith("chat -Q --source workflow-engine")
+
+
+def test_project_runtime_tolerates_profile_switch_failure_by_default(tmp_path: Path) -> None:
+    project_root = tmp_path / "switch-failure-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("switch-failure-runtime")
+    workitem = storage.create_workitem(project["id"], "Switch failure should not block")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Use coder",
+        kind="design",
+        profile="coder",
+        prompt_text="Do the work.",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('hermes_invoked.txt').write_text(' '.join(sys.argv[1:]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    config = HWEConfig(
+        profiles={
+            "coder": {
+                "switch_command": "python3 -c \"import sys; sys.stderr.write('missing model\\n'); sys.exit(7)\"",
+                "hermes_command": f"python3 {fake_hermes}",
+            }
+        }
+    )
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert storage.get_task(task["id"])["status"] == "succeeded"
+    run = storage.list_task_runs(task_id=task["id"])[0]
+    assert "WARNING: Model switch command failed with exit code 7" in Path(run["stderr_path"]).read_text(encoding="utf-8")
+    assert (project_root / "hermes_invoked.txt").exists()
+
+
+def test_project_runtime_runs_switch_commands_independently(tmp_path: Path) -> None:
+    project_root = tmp_path / "switch-commands-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("switch-commands-runtime")
+    workitem = storage.create_workitem(project["id"], "Switch commands should continue")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Use coder",
+        kind="design",
+        profile="coder",
+        prompt_text="Do the work.",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('hermes_invoked.txt').write_text(' '.join(sys.argv[1:]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    switch_marker = project_root / "switch_marker.txt"
+    config = HWEConfig(
+        profiles={
+            "coder": {
+                "switch_commands": [
+                    "python3 -c \"import sys; sys.stderr.write('not loaded\\n'); sys.exit(7)\"",
+                    {
+                        "command": f"python3 -c \"from pathlib import Path; Path('{switch_marker}').write_text('loaded', encoding='utf-8')\""
+                    },
+                ],
+                "hermes_command": f"python3 {fake_hermes}",
+            }
+        }
+    )
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert storage.get_task(task["id"])["status"] == "succeeded"
+    assert switch_marker.read_text(encoding="utf-8") == "loaded"
+    run = storage.list_task_runs(task_id=task["id"])[0]
+    stderr_text = Path(run["stderr_path"]).read_text(encoding="utf-8")
+    assert "not loaded" in stderr_text
+    assert "WARNING: Model switch command failed with exit code 7" in stderr_text
+    assert (project_root / "hermes_invoked.txt").exists()
+
+
+def test_project_runtime_closes_agent_stdin_by_default(tmp_path: Path) -> None:
+    project_root = tmp_path / "closed-stdin-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("closed-stdin-runtime")
+    workitem = storage.create_workitem(project["id"], "Interactive prompt should not hang")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(
+        workflow["id"],
+        "Use coder",
+        kind="design",
+        profile="coder",
+        prompt_text="Do the work.",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('stdin_text.txt').write_text(sys.stdin.read(), encoding='utf-8')\n"
+        "print('done')\n",
+        encoding="utf-8",
+    )
+    config = HWEConfig(profiles={"coder": {"hermes_command": f"python3 {fake_hermes}", "timeout_seconds": 5}})
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert storage.get_task(task["id"])["status"] == "succeeded"
+    assert (project_root / "stdin_text.txt").read_text(encoding="utf-8") == ""
+
+
+def test_project_runtime_turns_clarify_timeout_into_human_action(tmp_path: Path) -> None:
+    project_root = tmp_path / "clarify-timeout-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("clarify-timeout-runtime")
+    workitem = storage.create_workitem(project["id"], "Clarify timeout should wait")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(
+        workflow["id"],
+        "Break down plan",
+        kind="planning",
+        profile="designer",
+        prompt_text="Create tasks.",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "import sys, time\n"
+        "print('(clarify timed out after 120s — agent will decide)', flush=True)\n"
+        "time.sleep(5)\n",
+        encoding="utf-8",
+    )
+    config = HWEConfig(profiles={"designer": {"hermes_command": f"python3 {fake_hermes}", "timeout_seconds": 1}})
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_failed == 0
+    assert summary.waiting_for_human == 1
+    task_after = storage.get_task(task["id"])
+    assert task_after["status"] == "waiting_for_info"
+    run = storage.list_task_runs(task_id=task["id"])[0]
+    assert run["status"] == "waiting_for_info"
+    clarification_path = Path(run["stdout_path"]).parent / "clarification.md"
+    assert clarification_path.exists()
+    clarification_text = clarification_path.read_text(encoding="utf-8")
+    assert "Hermes Clarification Timeout" in clarification_text
+    actions = storage.list_human_actions(project["id"], status="pending")
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["kind"] == "info_request"
+    assert action["run_id"] == run["id"]
+    assert str(clarification_path) in action["body"]
+    assert action["questions"][0]["id"] == "clarify-timeout"
+
+
+def test_project_runtime_failure_releases_claim_on_unhandled_exception(tmp_path: Path) -> None:
+    project_root = tmp_path / "runtime-exception-release"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("runtime-exception-release")
+    workitem = storage.create_workitem(project["id"], "Missing template should fail cleanly")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(
+        workflow["id"],
+        "Use missing template",
+        kind="design",
+        profile="designer",
+        prompt_template_ref="designer/does-not-exist",
+        prompt_text="This should fail before Hermes is invoked.",
+    )
+
+    summary = ProjectRuntime(storage, config=HWEConfig()).run_workitem(project["id"], workitem["id"], max_tasks=1)
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_failed == 1
+    task_after = storage.get_task(task["id"])
+    assert task_after["status"] == "failed"
+    runs = storage.list_task_runs(task_id=task["id"])
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["result"]["error"] == "runtime_exception"
+    stderr_text = Path(runs[0]["stderr_path"]).read_text(encoding="utf-8")
+    assert "Unhandled HWE task runtime exception" in stderr_text
+    assert "Prompt template not found" in stderr_text
+    with storage.connect() as connection:
+        claim_row = connection.execute("SELECT status, release_reason FROM worker_claims WHERE task_id=?", (task["id"],)).fetchone()
+    assert claim_row["status"] == "released"
+    assert claim_row["release_reason"] == "failed"

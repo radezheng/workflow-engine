@@ -88,6 +88,7 @@ class WorkerAdapter:
                 cwd=self.spec.workspace,
                 check=False,
                 text=True,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=step.timeout_seconds or 3600,
@@ -151,24 +152,34 @@ class WorkerAdapter:
         )
 
     def _run_switch_command(self, profile_config: dict[str, Any], stdout: Any, stderr: Any) -> None:
-        switch_command = profile_config.get("switch_command")
-        if not switch_command:
+        switch_commands = _switch_commands(profile_config)
+        if not switch_commands:
             return
-        stdout.write(f"$ {switch_command}\n")
-        completed = subprocess.run(
-            str(switch_command),
-            cwd=self.spec.workspace,
-            shell=True,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=600,
+        strict_switch = _config_bool(profile_config.get("switch_command_required")) or _config_bool(
+            profile_config.get("strict_switch_command")
         )
-        stdout.write(completed.stdout)
-        stderr.write(completed.stderr)
-        if completed.returncode != 0:
-            raise RuntimeError(f"Model switch command failed with exit code {completed.returncode}")
+        for switch_command in switch_commands:
+            command = str(switch_command["command"])
+            stdout.write(f"$ {command}\n")
+            stdout.flush()
+            completed = subprocess.run(
+                command,
+                cwd=self.spec.workspace,
+                shell=True,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=int(switch_command.get("timeout_seconds", profile_config.get("switch_timeout_seconds", 600))),
+            )
+            stdout.write(completed.stdout)
+            stderr.write(completed.stderr)
+            if completed.returncode != 0:
+                message = f"Model switch command failed with exit code {completed.returncode}"
+                if strict_switch or _config_bool(switch_command.get("required")):
+                    raise RuntimeError(message)
+                stderr.write(f"WARNING: {message}; continuing with next switch step.\n")
+                stderr.flush()
 
     def _healthcheck(self, profile_config: dict[str, Any]) -> None:
         healthcheck = profile_config.get("healthcheck")
@@ -247,3 +258,38 @@ class WorkerAdapter:
         }
         result_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
         return WorkerResult(status, exit_code, stdout_path, stderr_path, prompt_path, result_path, diff_path, artifacts)
+
+
+def _config_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _switch_commands(profile_config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_commands = profile_config.get("switch_commands")
+    if raw_commands is None:
+        raw_commands = profile_config.get("switch_command")
+    if not raw_commands:
+        return []
+    if isinstance(raw_commands, str):
+        return [{"command": raw_commands}]
+    if not isinstance(raw_commands, list):
+        raise RuntimeError("Profile switch_commands must be a string or list")
+
+    commands: list[dict[str, Any]] = []
+    for index, raw_command in enumerate(raw_commands, start=1):
+        if isinstance(raw_command, str):
+            if raw_command.strip():
+                commands.append({"command": raw_command})
+            continue
+        if isinstance(raw_command, dict):
+            command = raw_command.get("command")
+            if not command:
+                raise RuntimeError(f"Profile switch_commands step {index} is missing command")
+            commands.append({**raw_command, "command": str(command)})
+            continue
+        raise RuntimeError(f"Profile switch_commands step {index} must be a string or mapping")
+    return commands

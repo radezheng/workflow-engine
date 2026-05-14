@@ -30,6 +30,8 @@ You can also run directly without installing:
 PYTHONPATH=src python3 -m hermes_workflow_engine --help
 ```
 
+For Hermes `default` profile bootstrapping on a new machine, including installing HWE, copying the bundled HWE skill, and running config/environment self-checks, see [docs/hermes-bootstrap.md](docs/hermes-bootstrap.md).
+
 ## Try The Example
 
 The example writes a small file with a command step, then dry-runs a coder profile step.
@@ -76,13 +78,34 @@ prompt_template_root: ./ptemplate
 
 `prompt_template_root` is an HWE-side template library path, not a target project path. Relative values are resolved from the directory containing `hwe.config.yaml`; the default is `./ptemplate`.
 
+Project workflow state uses SQLite by default, with one database at `<project>/.engine/engine.db`. To use a central local PostgreSQL database instead, configure `project_database` in `hwe.config.yaml`:
+
+```yaml
+project_database:
+  backend: postgres
+  host: 127.0.0.1
+  port: 5432
+  database: hindsight_db
+  user: hindsight_user
+  schema: hwe
+  gssencmode: disable
+  maxconn: 5
+  password: local-password
+```
+
+`hwe.config.yaml` is local and gitignored, so machine-specific database passwords may live there. For shared examples or hosted services, prefer `password_env` or `password_command` instead of a literal password. HWE does not create, stop, or mutate the Postgres container; it only creates and uses the configured schema and tables.
+Postgres storage uses a process-local connection pool; tune `maxconn` for API concurrency and local database capacity.
+For local Docker PostgreSQL on macOS, keep `gssencmode: disable` unless you explicitly use GSS/Kerberos; otherwise libpq can spend about 30 seconds per connection attempting GSSAPI negotiation.
+
 Project workflow agent tasks can also use HWE-local profile preflight settings:
 
 ```yaml
 profiles:
   coder:
     hermes_command: coder
-    switch_command: ./scripts/use-coder-model.sh
+    switch_commands:
+      - lms unload reviewer-model
+      - lms load coder-model --identifier coder-model --yes
     healthcheck:
       url: http://127.0.0.1:1234/v1/chat/completions
       model: coder-model
@@ -90,7 +113,27 @@ profiles:
       retry_delay_seconds: 2
 ```
 
-`run-workitem` runs `switch_command` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
+`run-workitem` runs `switch_commands` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
+Use `switch_commands` for multi-step model changes such as unload/load; HWE runs each command independently, logs non-zero exits as warnings by default, and continues to the next switch step. The legacy `switch_command` string still works for single commands. Set `switch_command_required: true` on a profile, or `required: true` on a `switch_commands` mapping entry, when a failed switch must block the agent run.
+Hermes hook prompts and dangerous-command approval prompts are handled by Hermes, not by HWE human actions. For trusted local profiles, set `hooks_auto_accept: true` in the Hermes profile config or configure `hermes_args: [--accept-hooks]` so hook prompts do not block headless runs. Do not use `--yolo` for routine HWE runs; dangerous-command prompts should fail or receive EOF instead of being broadly bypassed.
+If Hermes enters its clarify flow during a headless run and only emits a `clarify timed out` marker before the task timeout, HWE treats that as missing operator input instead of an ordinary failure. It writes `.engine/runs/<run-id>/clarification.md`, marks the task `waiting_for_info`, and creates a human action with links to `prompt.md`, `stdout.log`, `stderr.log`, and the clarification note. The exact question can only appear there if Hermes emitted it to its logs.
+
+The local UI can use AI-assisted form drafting for project, workitem, and human-action inputs. Configure one or more OpenAI-compatible providers under `ai_providers`:
+
+```yaml
+ai_providers:
+  local-lms:
+    type: openai_compatible
+    base_url: http://127.0.0.1:1234/v1
+    model: local-model
+  openai:
+    type: openai_compatible
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+```
+
+The UI lists configured providers and sends multi-turn assistant requests through HWE's API. When drafting a new workitem from a selected project, HWE includes a compact project context with existing workitems, current workflow IDs, task status counts, and recent task titles. Use `api_key_env` for hosted providers; do not store API keys directly in tracked files.
 
 Then a workflow can specify only the project name:
 
@@ -136,8 +179,10 @@ profiles:
     # Optional. Defaults to the profile alias when it exists, then HERMES_BIN/hermes.
     hermes_command: coder
     hermes_args: [--accept-hooks]
-    # Optional. Prefer values generated from Hermes CLI/API or profile metadata.
-    switch_command: ./scripts/use-coder-profile.sh
+    # Optional. Prefer separate steps for local unload/load flows.
+    switch_commands:
+      - ./scripts/unload-reviewer-profile.sh
+      - ./scripts/use-coder-profile.sh
     healthcheck:
       url: http://localhost:1234/v1/chat/completions
       model: coder-model
@@ -150,14 +195,17 @@ hwe validate workflow.yaml
 hwe run workflow.yaml [--dry-run] [--max-steps N]
 hwe status workflow.yaml
 hwe events workflow.yaml [--limit N]
+hwe serve [--host 127.0.0.1] [--port 8711] [--reload]
 ```
 
 ## Project/WorkItem/Task Queue
 
-Project workflow mode stores state in each project's `.engine/engine.db` and starts with project, work item, workflow, and task queue records. This is the persistence layer for the future planner and worker loop.
+Project workflow mode stores project, work item, workflow, task queue, task run, human action, and event records. By default this state lives in each project's `.engine/engine.db`; when `project_database.backend: postgres` is configured, those records live in the configured PostgreSQL schema while project files, prompt-template overrides, and run logs remain under the project `.engine/` directory.
 
 ```bash
 hwe project init my-project --id my-project
+hwe project archive my-project --id my-project
+hwe project restore my-project --id my-project
 
 WORKITEM_ID=$(hwe workitem create my-project "Add notes" \
   --requirements "Support Markdown notes" \
@@ -165,13 +213,15 @@ WORKITEM_ID=$(hwe workitem create my-project "Add notes" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
 WORKFLOW_ID=$(hwe workflow create my-project "$WORKITEM_ID" \
-  --planner-profile reviewer \
+  --planner-profile designer \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-hwe task create my-project "$WORKFLOW_ID" "Design notes" --kind design --profile reviewer
+hwe task create my-project "$WORKFLOW_ID" "Design notes" --kind design --profile designer
 hwe task list my-project "$WORKFLOW_ID"
-hwe task claim my-project "$WORKFLOW_ID" --worker-id local-reviewer --profile reviewer
+hwe task claim my-project "$WORKFLOW_ID" --worker-id local-designer --profile designer
 ```
+
+Archiving is a soft project-level state change. It keeps the project folder and workflow history intact, records project events, and hides the project from the default API/UI project list until it is restored or listed with archived projects included.
 
 To run the ready task queue directly from the CLI, use `run-workitem`. This is the push-style runner that API and UI layers can build on later:
 
@@ -179,7 +229,9 @@ To run the ready task queue directly from the CLI, use `run-workitem`. This is t
 hwe run-workitem my-project "$WORKITEM_ID" --dry-run --max-tasks 1
 ```
 
-For `kind=command` tasks, `--prompt-text` is treated as the shell command and runs from the project root. For `kind=http_check` tasks, `--prompt-text` is either a URL or a JSON smoke-test spec that HWE runs with retries. For agent tasks, HWE combines the role prompt template, task prompt, work item context, declared skills, outputs, and gates into `.engine/runs/<run-id>/prompt.md`, then invokes the task profile through Hermes. `--dry-run` writes prompts and logs without invoking Hermes or running shell commands.
+For `kind=command` tasks, `--prompt-text` is treated as the shell command and runs from the project root. For `kind=http_check` tasks, `--prompt-text` is either a URL or a JSON smoke-test spec that HWE runs with retries. For agent tasks, HWE combines the role prompt template, task prompt, work item context, declared skills, outputs, and gates into `.engine/runs/<run-id>/prompt.md`, then invokes the task profile through Hermes. `task_run_started` events include the `run_id`, and started runs register stdout/stderr/prompt paths as soon as those files are created so the UI/API can read logs while a task is still running. `--dry-run` writes prompts and logs without invoking Hermes or running shell commands.
+
+When a planning task succeeds, the UI can create a follow-up designer task to break the plan into executable HWE tasks. HWE does not parse natural-language plan output itself. Instead, the UI opens a dialog with the selected prompt template and editable input, including the successful plan stdout path, then the API creates one designer breakdown task that reads the plan file and creates the task graph through HWE commands.
 
 Example HTTP smoke task:
 
@@ -211,11 +263,13 @@ Transient failures can be returned to `ready` without losing run history:
 hwe task retry my-project "$TASK_ID" --reason transient-healthcheck
 ```
 
-If a command is cancelled and leaves a task claimed, release the claim back to `ready`:
+If a command or runner is cancelled and leaves a task claimed, first inspect recent events and any active task run logs. A `claimed` task may still be actively running; release only after you have evidence that the runner was interrupted, crashed, or abandoned. Then release the claim back to `ready`:
 
 ```bash
-hwe task release my-project "$TASK_ID" --reason cancelled-run
+hwe task release my-project "$TASK_ID" --reason abandoned-run
 ```
+
+Do not run endless background retry loops for a repeatedly claimed or timing-out agent task. Inspect `.engine/runs/<run-id>/prompt.md`, `stdout.log`, and `stderr.log`, then narrow the task, adjust timeout/model readiness, retry a transient failure, or create a human action if the task needs clarification.
 
 Tasks can also pause for human input or approval. Completing a task with `waiting_for_info` or `waiting_for_approval` creates a pending human action and releases the worker claim:
 
@@ -234,22 +288,39 @@ hwe answer my-project "$HUMAN_ACTION_ID" --text "Use PostgreSQL"
 
 For approval requests, use `hwe approve <project> <human-action-id>` or `hwe reject <project> <human-action-id> --reason "..."`. Answering or approving an action moves the waiting task back to `ready`; rejecting it marks the task `failed` so dependent tasks stay blocked.
 
-Role prompt templates let a project accumulate reusable planner, reviewer, QA, or coder instructions. Tasks can reference a template and declare the skills they expect:
+Agent tasks can also enter `waiting_for_info` automatically when Hermes reports a clarify timeout and then the headless process times out. In that case, inspect `.engine/runs/<run-id>/clarification.md` along with `prompt.md`, `stdout.log`, and `stderr.log`, answer the generated human action with the missing clarification or retry direction, then rerun the workitem.
+
+Role prompt templates are Markdown files, not database records. Public HWE templates live under `<prompt_template_root>/<role>/<name>.md`; project-specific overrides live under `<project>/.engine/prompt-templates/<role>/<name>.md`. Tasks reference a template by `role/name`, and HWE loads the project file first, then falls back to the public library:
 
 ```bash
-TEMPLATE_ID=$(hwe prompt-template create my-project reviewer implementation-review \
-  --body "Check correctness, tests, security, regressions, and acceptance evidence." \
-  --tag review --tag best-practices \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-
 hwe task create my-project "$WORKFLOW_ID" "Review implementation" \
   --kind review \
   --profile reviewer \
-  --prompt-template-id "$TEMPLATE_ID" \
+  --prompt-template-ref reviewer/implementation-review \
   --skill hermes-project-workflow
 ```
 
-If `--body` and `--body-file` are omitted, HWE reads the template from `<prompt_template_root>/<role>/<name>.md`, for example `./ptemplate/reviewer/implementation-review.md`. Relative `--body-file` paths are also resolved from `prompt_template_root`.
+The API/UI Prompt Templates surface lists both public and project files. Saving writes a project-local file; pushing public writes the shared HWE template library.
+
+## API And UI Console
+
+HWE includes a local FastAPI service and Vite React console for project workflow mode. Start the API from the repository root:
+
+```bash
+hwe serve --host 127.0.0.1 --port 8711
+```
+
+Start the UI in another terminal:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+The UI defaults to `http://127.0.0.1:8711` for the API and opens at `http://127.0.0.1:5173`. Set `VITE_HWE_API_BASE` before `npm run dev` if the API runs elsewhere.
+
+The console can create projects under `default_workspace_root`, archive or restore projects, create workitems, use configured AI providers to draft project/workitem/human-action/prompt-template inputs through multi-turn chat, and show project discovery, workitem selection, task queue status, task runs/logs, human actions, and recent events. Archived projects are hidden by default and can be shown with the Show archived toggle; they remain readable, while workflow mutation controls are disabled until restore. Succeeded planning tasks expose a Break down plan action that opens a prompt/input dialog before creating the designer breakdown task. The console also includes Prompt Templates and Settings surfaces: Prompt Templates lists public library files, project overrides, save-to-project actions, and push-public actions, while Settings shows the active HWE config path, workspace root, prompt template root, profiles, and AI provider names. Planned surfaces such as graph view, live logs, and daemon controls are visible as disabled menu entries so they stay on the roadmap.
 
 ## Current Validator Names
 

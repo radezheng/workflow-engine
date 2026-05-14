@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import HWEConfig, load_config
-from .project_storage import ProjectStorage, TASK_DONE_STATUSES
+from .project_storage import ProjectStorage, ProjectStorageError, TASK_DONE_STATUSES
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,14 @@ class ProjectRuntime:
         tasks_succeeded = 0
         tasks_failed = 0
         waiting_for_human = 0
+        self.storage.event(
+            project_id,
+            workitem_id,
+            workflow_id,
+            None,
+            "workitem_run_requested",
+            {"worker_id": worker_id, "profile": profile, "max_tasks": max_tasks},
+        )
 
         while max_tasks is None or tasks_started < max_tasks:
             task = self.storage.claim_next_task(workflow_id, worker_id=worker_id, profile=profile)
@@ -71,7 +80,36 @@ class ProjectRuntime:
         failed = [task["id"] for task in tasks if task["status"] in {"failed", "cancelled"}]
         blocked = [task["id"] for task in tasks if task["status"] == "pending"]
         open_tasks = [task["id"] for task in tasks if task["status"] not in TASK_DONE_STATUSES and task["status"] not in {"failed", "cancelled"}]
-        return ProjectRunSummary(project_id, workitem_id, workflow_id, tasks_started, tasks_succeeded, tasks_failed, waiting_for_human, blocked, failed, open_tasks)
+        summary = ProjectRunSummary(project_id, workitem_id, workflow_id, tasks_started, tasks_succeeded, tasks_failed, waiting_for_human, blocked, failed, open_tasks)
+        event_type = "workitem_run_no_ready_task" if tasks_started == 0 else "workitem_run_completed"
+        self.storage.event(project_id, workitem_id, workflow_id, None, event_type, summary.__dict__)
+        return summary
+
+    def run_one_task(self, project_id: str, task_id: str, *, worker_id: str = "hwe-runner", profile: str | None = None) -> ProjectRunSummary:
+        task = self.storage.get_task(task_id)
+        if task["project_id"] != project_id:
+            raise ProjectStorageError("Task does not belong to project.")
+        self.storage.event(project_id, task["workitem_id"], task["workflow_id"], task_id, "task_run_requested", {"worker_id": worker_id, "profile": profile})
+        claimed = self.storage.claim_task(task_id, worker_id=worker_id, profile=profile)
+        status = self.run_task(claimed)
+        tasks = self.storage.list_tasks(task["workflow_id"])
+        failed = [item["id"] for item in tasks if item["status"] in {"failed", "cancelled"}]
+        blocked = [item["id"] for item in tasks if item["status"] == "pending"]
+        open_tasks = [item["id"] for item in tasks if item["status"] not in TASK_DONE_STATUSES and item["status"] not in {"failed", "cancelled"}]
+        summary = ProjectRunSummary(
+            project_id=project_id,
+            workitem_id=task["workitem_id"],
+            workflow_id=task["workflow_id"],
+            tasks_started=1,
+            tasks_succeeded=1 if status == "succeeded" else 0,
+            tasks_failed=0 if status in {"succeeded", "waiting_for_info", "waiting_for_approval"} else 1,
+            waiting_for_human=1 if status in {"waiting_for_info", "waiting_for_approval"} else 0,
+            blocked=blocked,
+            failed=failed,
+            open=open_tasks,
+        )
+        self.storage.event(project_id, task["workitem_id"], task["workflow_id"], task_id, "task_run_completed", summary.__dict__)
+        return summary
 
     def run_task(self, task: dict[str, Any]) -> str:
         run = self.storage.create_task_run(task["id"], claim_id=task.get("claim_id"), profile=task.get("profile"))
@@ -80,19 +118,32 @@ class ProjectRuntime:
         stdout_path = run_dir / "stdout.log"
         stderr_path = run_dir / "stderr.log"
         prompt_path = run_dir / "prompt.md"
+        self.storage.update_task_run_paths(run["id"], stdout_path=stdout_path, stderr_path=stderr_path)
+        prompt_for_run = None
 
-        if task["kind"] == "command":
-            status, exit_code, result = self._run_command_task(task, stdout_path, stderr_path)
-            prompt_for_run = None
-        elif task["kind"] == "http_check":
-            status, exit_code, result = self._run_http_check_task(task, stdout_path, stderr_path)
-            prompt_for_run = None
-        else:
-            prompt_text = self._build_prompt(task)
-            prompt_path.write_text(prompt_text, encoding="utf-8")
-            status, exit_code, result = self._run_agent_task(task, prompt_text, stdout_path, stderr_path)
-            prompt_for_run = prompt_path
+        try:
+            if task["kind"] == "command":
+                status, exit_code, result = self._run_command_task(task, stdout_path, stderr_path)
+            elif task["kind"] == "http_check":
+                status, exit_code, result = self._run_http_check_task(task, stdout_path, stderr_path)
+            else:
+                prompt_text = self.build_task_prompt(task)
+                prompt_path.write_text(prompt_text, encoding="utf-8")
+                self.storage.update_task_run_paths(run["id"], prompt_path=prompt_path)
+                status, exit_code, result = self._run_agent_task(task, prompt_text, stdout_path, stderr_path)
+                prompt_for_run = prompt_path
+        except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
+            status = "failed"
+            exit_code = None
+            result = {"error": "runtime_exception", "type": type(exc).__name__, "message": str(exc)}
+            with stderr_path.open("a", encoding="utf-8") as stderr:
+                stderr.write("Unhandled HWE task runtime exception.\n")
+                stderr.write("".join(traceback.format_exception(exc)))
 
+        human_action_title = result.pop("_human_action_title", None)
+        human_action_body = result.pop("_human_action_body", None)
+        human_action_questions = result.pop("_human_action_questions", None)
+        human_action_evidence = result.pop("_human_action_evidence", None)
         self.storage.finish_task_run(
             run["id"],
             status=status,
@@ -102,7 +153,17 @@ class ProjectRuntime:
             stderr_path=stderr_path,
             prompt_path=prompt_for_run,
         )
-        self.storage.complete_task(task["id"], status=status, result={"run_id": run["id"], **result})
+        self.storage.complete_task(
+            task["id"],
+            status=status,
+            result={"run_id": run["id"], **result},
+            human_action_title=human_action_title,
+            human_action_body=human_action_body,
+            questions=human_action_questions,
+            evidence=human_action_evidence,
+            requested_by=task.get("profile"),
+            run_id=run["id"],
+        )
         return status
 
     def _run_command_task(self, task: dict[str, Any], stdout_path: Path, stderr_path: Path) -> tuple[str, int | None, dict[str, Any]]:
@@ -255,6 +316,7 @@ class ProjectRuntime:
             stderr_path.write_text("", encoding="utf-8")
             return "succeeded", 0, {"dry_run": True, "profile": profile_name}
 
+        timed_out = False
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
             try:
                 self._run_switch_command(profile_config, stdout, stderr)
@@ -263,28 +325,63 @@ class ProjectRuntime:
                 stderr.write(f"{exc}\n")
                 return "failed", None, {"profile": profile_name, "error": str(exc)}
 
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=self.storage.project_root,
-                check=False,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=int(profile_config.get("timeout_seconds", 3600)),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
             )
-            stdout.write(completed.stdout)
-            stderr.write(completed.stderr)
+            try:
+                return_code = process.wait(timeout=int(profile_config.get("timeout_seconds", 3600)))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return_code = process.wait()
+                timed_out = True
+                stderr.write(f"Hermes command timed out after {profile_config.get('timeout_seconds', 3600)} seconds.\n")
+                stderr.flush()
 
-        status = "succeeded" if self._is_success_exit_code(completed.returncode, profile_config) else "failed"
-        return status, completed.returncode, {"profile": profile_name}
+        if timed_out and _stdout_has_clarify_timeout(stdout_path):
+            clarification_path = _write_clarification_file(
+                stdout_path.parent,
+                prompt_path=stdout_path.parent / "prompt.md",
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout_seconds=int(profile_config.get("timeout_seconds", 3600)),
+            )
+            body = (
+                "Hermes entered its clarify flow, no interactive answer was available, and the agent later timed out. "
+                "The exact clarification question was not emitted to stdout/stderr by Hermes, so inspect the run artifacts before retrying.\n\n"
+                f"Clarification note: {clarification_path}\n"
+                f"Prompt: {stdout_path.parent / 'prompt.md'}\n"
+                f"Stdout: {stdout_path}\n"
+                f"Stderr: {stderr_path}"
+            )
+            return "waiting_for_info", return_code, {
+                "profile": profile_name,
+                "error": "clarify_timeout",
+                "clarification_path": str(clarification_path),
+                "_human_action_title": "Hermes clarification timed out",
+                "_human_action_body": body,
+                "_human_action_questions": [
+                    {
+                        "id": "clarify-timeout",
+                        "question": "Review the run artifacts and provide the missing clarification or direction for retrying this task.",
+                    }
+                ],
+                "_human_action_evidence": [str(clarification_path), str(stdout_path), str(stderr_path), str(stdout_path.parent / "prompt.md")],
+            }
 
-    def _build_prompt(self, task: dict[str, Any]) -> str:
+        status = "succeeded" if self._is_success_exit_code(return_code, profile_config) else "failed"
+        return status, return_code, {"profile": profile_name}
+
+    def build_task_prompt(self, task: dict[str, Any]) -> str:
         workitem = self.storage.get_workitem(task["workitem_id"])
         parts: list[str] = []
-        template_id = task.get("prompt_template_id")
-        if template_id:
-            template = self.storage.get_role_prompt_template(template_id)
-            parts.append(template["body_md"].rstrip())
+        template_ref = task.get("prompt_template_ref")
+        if template_ref:
+            parts.append(self._prompt_template_body(str(template_ref)).rstrip())
         if task.get("prompt_text"):
             parts.append(str(task["prompt_text"]).rstrip())
 
@@ -295,7 +392,6 @@ class ProjectRuntime:
             f"Workitem: {workitem['title']}",
             f"Task: {task['title']}",
             f"Kind: {task['kind']}",
-            f"Profile: {task.get('profile') or 'default'}",
             f"Risk: {task['risk_level']}",
             "",
             "## Requirements",
@@ -318,6 +414,20 @@ class ProjectRuntime:
         parts.append("\n".join(metadata))
         return "\n\n".join(part for part in parts if part.strip())
 
+    def _prompt_template_body(self, template_ref: str) -> str:
+        safe_ref = template_ref.strip().removesuffix(".md")
+        if not safe_ref or safe_ref.startswith("/") or ".." in Path(safe_ref).parts or len(Path(safe_ref).parts) != 2:
+            raise RuntimeError(f"Invalid prompt template ref: {template_ref}")
+        relative_path = Path(safe_ref).with_suffix(".md")
+        candidates = [
+            self.storage.engine_dir / "prompt-templates" / relative_path,
+            self.config.prompt_template_root / relative_path if self.config.prompt_template_root else None,
+        ]
+        for candidate in candidates:
+            if candidate and candidate.exists():
+                return candidate.read_text(encoding="utf-8")
+        raise RuntimeError(f"Prompt template not found: {template_ref}")
+
     def _hermes_command_args(self, profile_name: str, profile_config: dict[str, Any], prompt_text: str) -> list[str]:
         hermes_profile = str(profile_config.get("hermes_profile", profile_name))
         configured_command = profile_config.get("hermes_command") or profile_config.get("command")
@@ -336,25 +446,34 @@ class ProjectRuntime:
         return [*base_command, "chat", "-Q", "--source", "workflow-engine", *[str(arg) for arg in extra_args], "-q", prompt_text]
 
     def _run_switch_command(self, profile_config: dict[str, Any], stdout: Any, stderr: Any) -> None:
-        switch_command = profile_config.get("switch_command")
-        if not switch_command:
+        switch_commands = _switch_commands(profile_config)
+        if not switch_commands:
             return
-        stdout.write(f"$ {switch_command}\n")
-        stdout.flush()
-        completed = subprocess.run(
-            str(switch_command),
-            cwd=self.storage.project_root,
-            shell=True,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=int(profile_config.get("switch_timeout_seconds", 900)),
+        strict_switch = _config_bool(profile_config.get("switch_command_required")) or _config_bool(
+            profile_config.get("strict_switch_command")
         )
-        stdout.write(completed.stdout)
-        stderr.write(completed.stderr)
-        if completed.returncode != 0:
-            raise RuntimeError(f"Model switch command failed with exit code {completed.returncode}")
+        for switch_command in switch_commands:
+            command = str(switch_command["command"])
+            stdout.write(f"$ {command}\n")
+            stdout.flush()
+            completed = subprocess.run(
+                command,
+                cwd=self.storage.project_root,
+                shell=True,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=int(switch_command.get("timeout_seconds", profile_config.get("switch_timeout_seconds", 900))),
+            )
+            stdout.write(completed.stdout)
+            stderr.write(completed.stderr)
+            if completed.returncode != 0:
+                message = f"Model switch command failed with exit code {completed.returncode}"
+                if strict_switch or _config_bool(switch_command.get("required")):
+                    raise RuntimeError(message)
+                stderr.write(f"WARNING: {message}; continuing with next switch step.\n")
+                stderr.flush()
 
     def _healthcheck(self, profile_config: dict[str, Any]) -> None:
         healthcheck = profile_config.get("healthcheck")
@@ -392,3 +511,91 @@ class ProjectRuntime:
             success_exit_codes = [0]
         allowed = {int(code) for code in success_exit_codes if isinstance(code, int) or str(code).lstrip("-").isdigit()}
         return exit_code in allowed
+
+
+def _config_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _switch_commands(profile_config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_commands = profile_config.get("switch_commands")
+    if raw_commands is None:
+        raw_commands = profile_config.get("switch_command")
+    if not raw_commands:
+        return []
+    if isinstance(raw_commands, str):
+        return [{"command": raw_commands}]
+    if not isinstance(raw_commands, list):
+        raise RuntimeError("Profile switch_commands must be a string or list")
+
+    commands: list[dict[str, Any]] = []
+    for index, raw_command in enumerate(raw_commands, start=1):
+        if isinstance(raw_command, str):
+            if raw_command.strip():
+                commands.append({"command": raw_command})
+            continue
+        if isinstance(raw_command, dict):
+            command = raw_command.get("command")
+            if not command:
+                raise RuntimeError(f"Profile switch_commands step {index} is missing command")
+            commands.append({**raw_command, "command": str(command)})
+            continue
+        raise RuntimeError(f"Profile switch_commands step {index} must be a string or mapping")
+    return commands
+
+
+def _stdout_has_clarify_timeout(stdout_path: Path) -> bool:
+    try:
+        stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "clarify timed out" in stdout_text.lower()
+
+
+def _write_clarification_file(run_dir: Path, *, prompt_path: Path, stdout_path: Path, stderr_path: Path, timeout_seconds: int) -> Path:
+    clarification_path = run_dir / "clarification.md"
+    clarification_path.write_text(
+        "\n".join(
+            [
+                "# Hermes Clarification Timeout",
+                "",
+                f"Hermes reported a clarify timeout and the HWE agent task timed out after {timeout_seconds} seconds.",
+                "",
+                "HWE could not capture the exact clarification question because Hermes did not emit it to stdout or stderr.",
+                "Answer this human action with the missing clarification or with operator direction for retrying/superseding the task.",
+                "",
+                "## Run Artifacts",
+                "",
+                f"- Prompt: {prompt_path}",
+                f"- Stdout: {stdout_path}",
+                f"- Stderr: {stderr_path}",
+                "",
+                "## Stdout Tail",
+                "",
+                "```text",
+                _tail_text(stdout_path),
+                "```",
+                "",
+                "## Stderr Tail",
+                "",
+                "```text",
+                _tail_text(stderr_path),
+                "```",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return clarification_path
+
+
+def _tail_text(path: Path, *, limit: int = 4000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-limit:]

@@ -33,6 +33,11 @@ def main(argv: list[str] | None = None) -> int:
     events_parser.add_argument("workflow")
     events_parser.add_argument("--limit", type=int, default=50)
 
+    serve_parser = subparsers.add_parser("serve", help="Run the HWE FastAPI server for the local UI.")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8711)
+    serve_parser.add_argument("--reload", action="store_true")
+
     run_workitem_parser = subparsers.add_parser("run-workitem", help="Run ready tasks for a project work item.")
     run_workitem_parser.add_argument("project")
     run_workitem_parser.add_argument("workitem_id")
@@ -60,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     project_show = project_subparsers.add_parser("show", help="Show a project record.")
     project_show.add_argument("project")
     project_show.add_argument("--id", dest="project_id", default=None)
+    project_archive = project_subparsers.add_parser("archive", help="Archive a project without deleting its state.")
+    project_archive.add_argument("project")
+    project_archive.add_argument("--id", dest="project_id", default=None)
+    project_restore = project_subparsers.add_parser("restore", help="Restore an archived project.")
+    project_restore.add_argument("project")
+    project_restore.add_argument("--id", dest="project_id", default=None)
     project_events = project_subparsers.add_parser("events", help="Show project events as JSON lines.")
     project_events.add_argument("project")
     project_events.add_argument("--id", dest="project_id", default=None)
@@ -81,23 +92,6 @@ def main(argv: list[str] | None = None) -> int:
     workitem_list.add_argument("project")
     workitem_list.add_argument("--project-id", default=None)
 
-    prompt_template_parser = subparsers.add_parser("prompt-template", help="Manage role prompt templates.")
-    prompt_template_subparsers = prompt_template_parser.add_subparsers(dest="prompt_template_command", required=True)
-    prompt_template_create = prompt_template_subparsers.add_parser("create", help="Create a role prompt template.")
-    prompt_template_create.add_argument("project")
-    prompt_template_create.add_argument("role")
-    prompt_template_create.add_argument("name")
-    prompt_template_create.add_argument("--project-id", default=None)
-    prompt_template_create.add_argument("--version", default="0.1.0")
-    prompt_template_create.add_argument("--description", default="")
-    prompt_template_create.add_argument("--body", default=None)
-    prompt_template_create.add_argument("--body-file", default=None)
-    prompt_template_create.add_argument("--tag", action="append", default=[])
-    prompt_template_list = prompt_template_subparsers.add_parser("list", help="List role prompt templates.")
-    prompt_template_list.add_argument("project")
-    prompt_template_list.add_argument("--project-id", default=None)
-    prompt_template_list.add_argument("--role", default=None)
-
     workflow_parser = subparsers.add_parser("workflow", help="Manage workflows.")
     workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
     workflow_create = workflow_subparsers.add_parser("create", help="Create a workflow for a work item.")
@@ -116,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     task_create.add_argument("--profile", default=None)
     task_create.add_argument("--depends-on", action="append", default=[])
     task_create.add_argument("--skill", action="append", default=[])
-    task_create.add_argument("--prompt-template-id", default=None)
+    task_create.add_argument("--prompt-template-ref", default=None, help="File template ref such as reviewer/implementation-review.")
     task_create.add_argument("--output", action="append", default=[])
     task_create.add_argument("--gate", action="append", default=[])
     task_create.add_argument("--prompt-text", default=None)
@@ -214,8 +208,6 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_project(args)
         if args.command == "workitem":
             return _handle_workitem(args)
-        if args.command == "prompt-template":
-            return _handle_prompt_template(args)
         if args.command == "workflow":
             return _handle_workflow(args)
         if args.command == "task":
@@ -224,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_human_action(args)
         if args.command == "run-workitem":
             return _handle_run_workitem(args)
+        if args.command == "serve":
+            return _handle_serve(args)
 
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
@@ -317,6 +311,12 @@ def _handle_project(args: argparse.Namespace) -> int:
     if args.project_command == "show":
         _print_json(storage.get_project(project_id))
         return 0
+    if args.project_command == "archive":
+        _print_json(storage.archive_project(project_id))
+        return 0
+    if args.project_command == "restore":
+        _print_json(storage.restore_project(project_id))
+        return 0
     if args.project_command == "events":
         for event in storage.list_events(project_id, limit=args.limit):
             print(json.dumps(event, sort_keys=True))
@@ -348,37 +348,6 @@ def _handle_workitem(args: argparse.Namespace) -> int:
     return 2
 
 
-def _handle_prompt_template(args: argparse.Namespace) -> int:
-    storage = _project_storage(args.project)
-    project_id = args.project_id or Path(args.project).expanduser().name
-    if args.prompt_template_command == "create":
-        _ensure_project(storage, project_id)
-        config = load_config()
-        body = _body_text(
-            args.body,
-            args.body_file,
-            "prompt template body",
-            base_dir=config.prompt_template_root,
-            default_file=Path(args.role) / f"{args.name}.md",
-        )
-        _print_json(
-            storage.create_role_prompt_template(
-                project_id,
-                args.role,
-                args.name,
-                body,
-                version=args.version,
-                description=args.description,
-                tags=args.tag,
-            )
-        )
-        return 0
-    if args.prompt_template_command == "list":
-        _print_json(storage.list_role_prompt_templates(project_id, role=args.role))
-        return 0
-    return 2
-
-
 def _handle_workflow(args: argparse.Namespace) -> int:
     storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
@@ -399,7 +368,7 @@ def _handle_task(args: argparse.Namespace) -> int:
                 profile=args.profile,
                 depends_on=args.depends_on,
                 skills=args.skill,
-                prompt_template_id=args.prompt_template_id,
+                prompt_template_ref=args.prompt_template_ref,
                 outputs=args.output,
                 gates=args.gate,
                 prompt_text=args.prompt_text,
@@ -502,9 +471,19 @@ def _handle_human_action(args: argparse.Namespace) -> int:
     return 2
 
 
+def _handle_serve(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise ConfigError("Install HWE with API dependencies before running `hwe serve`.") from exc
+    uvicorn.run("hermes_workflow_engine.api:app", host=args.host, port=args.port, reload=args.reload)
+    return 0
+
+
 def _project_storage(project: str) -> ProjectStorage:
-    resolved_root = resolve_project_root(project)
-    return ProjectStorage(resolved_root)
+    config = load_config()
+    resolved_root = resolve_project_root(project, config)
+    return ProjectStorage(resolved_root, config=config)
 
 
 def _ensure_project(storage: ProjectStorage, project_id: str) -> None:

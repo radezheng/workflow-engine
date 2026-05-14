@@ -1,0 +1,21 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "hwe: serve api",
+			"type": "shell",
+			"command": "HWE_CONFIG=$PWD/hwe.config.yaml .venv/bin/hwe serve --host 127.0.0.1 --port 8711",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "hwe: serve ui",
+			"type": "shell",
+			"command": "npm --prefix ui run dev -- --host 127.0.0.1 --port 5173",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
