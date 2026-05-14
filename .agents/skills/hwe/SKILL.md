@@ -429,6 +429,8 @@ HWE project runtime performs profile preflight for agent tasks:
 
 `switch_commands` is the preferred shape for multi-step local model switches. HWE runs each command independently, records stdout/stderr, and logs a warning if a non-required command exits non-zero before continuing to the next switch step. This keeps unload/load flows tolerant when a model is already loaded or already unloaded. The legacy single-string `switch_command` still works for one-step switches. Configure `switch_command_required: true` on a profile, or `required: true` on an individual switch step, only when a failed switch must block execution.
 
+Healthcheck retry absorbs slow model switching and server warmup. Tune `healthcheck.retries`, `healthcheck.retry_delay_seconds`, and `healthcheck.timeout_seconds` in local HWE config. HWE writes each healthcheck attempt and failure to the task run `stderr.log`; an empty `stderr.log` on an old `started` run usually points to an abandoned runner rather than an active healthcheck retry.
+
 Hermes hook and dangerous-command approval prompts are handled by Hermes, not by HWE human actions. For trusted local profiles, set `hooks_auto_accept: true` in the Hermes profile config or configure `hermes_args: [--accept-hooks]`; do not use `--yolo` for routine HWE runs. HWE closes agent stdin so unexpected interactive prompts fail or receive EOF instead of hanging until timeout.
 
 `task_run_started` events include the `run_id`. Active runs should have stdout/stderr/prompt paths under `.engine/runs/<run-id>/` so the UI/API can inspect logs while a task is still running.

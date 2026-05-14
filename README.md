@@ -131,9 +131,11 @@ profiles:
       model: coder-model
       retries: 5
       retry_delay_seconds: 2
+      timeout_seconds: 30
 ```
 
 `run-workitem` runs `switch_commands` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
+    Healthcheck retries are meant to absorb slow model switching and server warmup. HWE logs each healthcheck attempt to the task run `stderr.log`; tune `retries`, `retry_delay_seconds`, and `timeout_seconds` for local model load time.
 Use `switch_commands` for multi-step model changes such as unload/load; HWE runs each command independently, logs non-zero exits as warnings by default, and continues to the next switch step. The legacy `switch_command` string still works for single commands. Set `switch_command_required: true` on a profile, or `required: true` on a `switch_commands` mapping entry, when a failed switch must block the agent run.
 Hermes hook prompts and dangerous-command approval prompts are handled by Hermes, not by HWE human actions. For trusted local profiles, set `hooks_auto_accept: true` in the Hermes profile config or configure `hermes_args: [--accept-hooks]` so hook prompts do not block headless runs. Do not use `--yolo` for routine HWE runs; dangerous-command prompts should fail or receive EOF instead of being broadly bypassed.
 If Hermes enters its clarify flow during a headless run and only emits a `clarify timed out` marker before the task timeout, HWE treats that as missing operator input instead of an ordinary failure. It writes `.engine/runs/<run-id>/clarification.md`, marks the task `waiting_for_info`, and creates a human action with links to `prompt.md`, `stdout.log`, `stderr.log`, and the clarification note. The exact question can only appear there if Hermes emitted it to its logs.

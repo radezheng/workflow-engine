@@ -40,6 +40,9 @@ profiles:
     healthcheck:
       url: http://127.0.0.1:1234/v1/chat/completions
       model: designer-model
+      retries: 10
+      retry_delay_seconds: 5
+      timeout_seconds: 30
 
   coder:
     hermes_profile: coder
@@ -49,6 +52,9 @@ profiles:
     healthcheck:
       url: http://127.0.0.1:1234/v1/chat/completions
       model: coder-model
+      retries: 10
+      retry_delay_seconds: 5
+      timeout_seconds: 30
 
   reviewer:
     hermes_profile: reviewer
@@ -58,3 +64,6 @@ profiles:
     healthcheck:
       url: http://127.0.0.1:1234/v1/chat/completions
       model: reviewer-model
+      retries: 10
+      retry_delay_seconds: 5
+      timeout_seconds: 30

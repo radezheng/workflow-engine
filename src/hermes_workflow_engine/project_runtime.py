@@ -320,7 +320,7 @@ class ProjectRuntime:
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
             try:
                 self._run_switch_command(profile_config, stdout, stderr)
-                self._healthcheck(profile_config)
+                self._healthcheck(profile_config, stderr=stderr)
             except RuntimeError as exc:
                 stderr.write(f"{exc}\n")
                 return "failed", None, {"profile": profile_name, "error": str(exc)}
@@ -475,32 +475,44 @@ class ProjectRuntime:
                 stderr.write(f"WARNING: {message}; continuing with next switch step.\n")
                 stderr.flush()
 
-    def _healthcheck(self, profile_config: dict[str, Any]) -> None:
+    def _healthcheck(self, profile_config: dict[str, Any], *, stderr: Any | None = None) -> None:
         healthcheck = profile_config.get("healthcheck")
         if not isinstance(healthcheck, dict) or not healthcheck.get("url"):
             return
         retries = int(healthcheck.get("retries", 5))
         retry_delay_seconds = float(healthcheck.get("retry_delay_seconds", 2))
+        timeout_seconds = float(healthcheck.get("timeout_seconds", healthcheck.get("timeout", 30)))
+        url = str(healthcheck["url"])
+        model = healthcheck.get("model", profile_config.get("model", ""))
         payload = {
-            "model": healthcheck.get("model", profile_config.get("model", "")),
+            "model": model,
             "messages": [{"role": "user", "content": "healthcheck"}],
             "max_tokens": 4,
         }
-        request = urllib.request.Request(
-            str(healthcheck["url"]),
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         last_error: Exception | None = None
         for attempt in range(max(1, retries)):
+            if stderr is not None:
+                stderr.write(f"Healthcheck attempt {attempt + 1}/{max(1, retries)}: {url} model={model} timeout={timeout_seconds}s\n")
+                stderr.flush()
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
+                request = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                     if response.status < 400:
+                        if stderr is not None:
+                            stderr.write(f"Healthcheck succeeded with HTTP {response.status}.\n")
+                            stderr.flush()
                         return
                     last_error = RuntimeError(f"Model healthcheck failed with HTTP {response.status}")
-            except urllib.error.URLError as exc:
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = exc
+            if stderr is not None and last_error is not None:
+                stderr.write(f"Healthcheck failed on attempt {attempt + 1}: {last_error}\n")
+                stderr.flush()
             if attempt < retries - 1:
                 time.sleep(retry_delay_seconds)
         raise RuntimeError(f"Model healthcheck failed: {last_error}")

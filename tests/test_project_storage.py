@@ -619,6 +619,54 @@ def test_project_runtime_runs_switch_commands_independently(tmp_path: Path) -> N
     assert (project_root / "hermes_invoked.txt").exists()
 
 
+def test_project_runtime_retries_and_logs_healthcheck_failure(tmp_path: Path) -> None:
+    project_root = tmp_path / "healthcheck-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("healthcheck-runtime")
+    workitem = storage.create_workitem(project["id"], "Healthcheck should retry")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(
+        workflow["id"],
+        "Use designer",
+        kind="design",
+        profile="designer",
+        prompt_text="Do the work.",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "from pathlib import Path\n"
+        "Path('hermes_invoked.txt').write_text('unexpected', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    config = HWEConfig(
+        profiles={
+            "designer": {
+                "hermes_command": f"python3 {fake_hermes}",
+                "healthcheck": {
+                    "url": "http://127.0.0.1:1/v1/chat/completions",
+                    "model": "slow-model",
+                    "retries": 2,
+                    "retry_delay_seconds": 0,
+                    "timeout_seconds": 0.1,
+                },
+            }
+        }
+    )
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"])
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_failed == 1
+    assert storage.get_task(task["id"])["status"] == "failed"
+    run = storage.list_task_runs(task_id=task["id"])[0]
+    assert run["status"] == "failed"
+    stderr_text = Path(run["stderr_path"]).read_text(encoding="utf-8")
+    assert "Healthcheck attempt 1/2" in stderr_text
+    assert "Healthcheck attempt 2/2" in stderr_text
+    assert "Model healthcheck failed" in stderr_text
+    assert not (project_root / "hermes_invoked.txt").exists()
+
+
 def test_project_runtime_closes_agent_stdin_by_default(tmp_path: Path) -> None:
     project_root = tmp_path / "closed-stdin-runtime"
     storage = ProjectStorage(project_root)
