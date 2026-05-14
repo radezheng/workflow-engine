@@ -290,21 +290,22 @@ prompt_template_root: {template_root}
     storage.complete_task(task["id"], status="succeeded", result={"run_id": run["id"]})
 
     client = TestClient(app)
-    prompt_text = f"Read this plan and create HWE tasks.\nPlan stdout path: {stdout_path}"
     response = client.post(
         f"/api/projects/materialize-project/tasks/{task['id']}/materialize-plan",
-        json={"project_id": "materialize-project", "prompt_template_ref": "designer/task-breakdown", "prompt_text": prompt_text},
+        json={"project_id": "materialize-project", "prompt_template_ref": "designer/task-breakdown"},
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert len(payload["created"]) == 1
     created = payload["created"][0]
-    assert created["title"] == "Break down plan into executable tasks"
+    assert created["title"] == "将 plan 物化为可执行任务"
     assert created["kind"] == "planning"
     assert created["profile"] == "designer"
     assert created["prompt_template_ref"] == "designer/task-breakdown"
-    assert created["prompt_text"] == prompt_text
+    assert "读取已完成的 workitem plan/design 文件" in created["prompt_text"]
+    assert f"Plan stdout 路径：{stdout_path}" in created["prompt_text"]
+    assert "Read the completed workitem plan file" not in created["prompt_text"]
 
     repeated = client.post(f"/api/projects/materialize-project/tasks/{task['id']}/materialize-plan", json={"project_id": "materialize-project"})
     assert repeated.status_code == 200

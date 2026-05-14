@@ -149,25 +149,25 @@ WORKFLOW_ID=$(hwe workflow create <project> "$WORKITEM_ID" \
   --planner-profile designer \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-PLAN_TASK_ID=$(hwe task create <project> "$WORKFLOW_ID" "Plan workitem" \
+PLAN_TASK_ID=$(hwe task create <project> "$WORKFLOW_ID" "规划 workitem" \
   --kind design \
   --profile designer \
   --skill hwe \
   --prompt-template-ref designer/workitem-plan \
-  --prompt-text "Plan the workitem. Do not create implementation/review tasks in this planning task; a follow-up task-breakdown task will read this run's stdout path and create the HWE task graph." \
+  --prompt-text "规划这个 workitem。不要在本 planning 任务中创建 implementation/review 任务；后续 task-breakdown 任务会读取本次运行的 stdout.log 路径并创建 HWE 任务图。" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ```
 
 After the planning task succeeds, do not manually transcribe the plan text into implementation tasks. Create one follow-up task-breakdown task, pass the planning run's `stdout.log` path in `--prompt-text`, and run that task so it creates the task graph through HWE commands:
 
 ```bash
-hwe task create <project> "$WORKFLOW_ID" "Break down plan into HWE tasks" \
+hwe task create <project> "$WORKFLOW_ID" "将 plan 物化为 HWE tasks" \
   --kind design \
   --profile designer \
   --depends-on "$PLAN_TASK_ID" \
   --skill hwe \
   --prompt-template-ref designer/task-breakdown \
-  --prompt-text "Read plan stdout at <absolute-path-to-stdout.log>. Create the executable HWE task graph for workflow $WORKFLOW_ID using hwe task create. Do not only describe tasks in prose."
+  --prompt-text "读取 plan/design stdout：<absolute-path-to-stdout.log>。使用 hwe task create 为 workflow $WORKFLOW_ID 创建可执行 HWE 任务图。不要只用 prose 描述任务。"
 ```
 
 Then run ready tasks with the push-style runner:

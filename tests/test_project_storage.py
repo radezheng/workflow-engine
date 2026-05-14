@@ -480,6 +480,15 @@ def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) ->
     prompt = project_root / ".engine" / "runs" / run_started["payload"]["run_id"] / "prompt.md"
     prompt_text = prompt.read_text(encoding="utf-8")
     assert "Review design scope carefully." in prompt_text
+    assert "# HWE 项目任务" in prompt_text
+    assert "项目根目录：" in prompt_text
+    assert "## 需求" in prompt_text
+    assert "## 约束" in prompt_text
+    assert "## 声明的技能" in prompt_text
+    assert "如果缺少必要信息" in prompt_text
+    assert "# HWE Project Task" not in prompt_text
+    assert "## Requirements" not in prompt_text
+    assert "## Declared Skills" not in prompt_text
     assert "Support Markdown notes." in prompt_text
     assert "hermes-project-workflow" in prompt_text
 
