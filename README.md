@@ -37,7 +37,7 @@ You can also run directly without installing:
 PYTHONPATH=src python3 -m hermes_workflow_engine --help
 ```
 
-For Hermes `default` profile bootstrapping on a new machine, including installing HWE, copying the bundled HWE skill, and running config/environment self-checks, see [docs/hermes-bootstrap.md](docs/hermes-bootstrap.md).
+For Hermes `default` profile bootstrapping, including owner-confirmed install/update parameters, copying the bundled HWE skill, and running config/environment self-checks, see [docs/hermes-bootstrap.md](docs/hermes-bootstrap.md).
 
 To update an existing checkout:
 

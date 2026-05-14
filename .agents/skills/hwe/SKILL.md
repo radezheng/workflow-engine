@@ -23,7 +23,7 @@ Do not assume machine-specific paths, ports, workspace roots, model names, or da
 
 ## Install Or Update HWE
 
-When the user asks to install, update, repair, or bootstrap HWE, use the public repository, then run doctor before mutating workflow state. Install into an operator-approved directory:
+When the user asks to install, update, repair, or bootstrap HWE, use the public repository as the source of truth, then run doctor before mutating workflow state. Do not keep or use an unversioned local copy as the install source. Before changing the machine, confirm any missing owner parameters: install directory, `HWE_CONFIG` path, workspace root, storage backend, Hermes skill directories, permission to overwrite existing skill copies, console ports, and whether to run/clean up smoke tests.
 
 ```bash
 export HWE_REPO=${HWE_REPO:-$HOME/workflow-engine}
@@ -38,10 +38,11 @@ export HWE_PYTHON=$PWD/.venv/bin/python
 export HWE_CONFIG=${HWE_CONFIG:-$PWD/hwe.config.yaml}
 ```
 
-Update an existing checkout only when it has no unresolved local changes; if `git status --short` shows local changes, ask whether to commit, stash, or keep them:
+Update an existing checkout only when `origin` points to the public repo and it has no unresolved local changes; otherwise ask the owner how to proceed:
 
 ```bash
 cd "$HWE_REPO"
+git remote get-url origin
 git status --short
 git pull --ff-only
 . .venv/bin/activate
@@ -58,7 +59,7 @@ rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' \
 "$HWE_PYTHON" "$HWE_REPO/.agents/skills/hwe/scripts/doctor.py" --repo "$HWE_REPO" --config "$HWE_CONFIG"
 ```
 
-If HWE dispatches to multiple Hermes profiles, copy the full `hwe` skill directory into each target profile's configured skill directory and re-check discovery before running agent tasks.
+If HWE dispatches to multiple Hermes profiles, copy the full `hwe` skill directory into each owner-approved target profile skill directory and re-check discovery before running agent tasks.
 
 ## Operating Checkpoints
 

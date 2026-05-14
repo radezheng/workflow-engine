@@ -1,19 +1,27 @@
-# Hermes Bootstrap Guide For HWE
+# Hermes Agent Bootstrap Guide For HWE
 
 Use this guide when a Hermes `default` profile needs to install or update HWE, install the HWE skill, and validate that the current environment matches the active HWE config.
 
 Public repository: `https://github.com/radezheng/workflow-engine`
 
-## 1. Locate Or Clone The HWE Repo
+The public repository is the source of truth. Do not treat an unversioned local checkout, copied skill directory, or old machine-specific installation as authoritative. If an existing `HWE_REPO` is not a clean checkout of the public repo, ask the owner before moving it aside, reusing it, or choosing a different install directory.
 
-If the repo already exists, set `HWE_REPO` to it:
+## Confirm Parameters With The Owner
 
-```bash
-export HWE_REPO=/path/to/workflow-engine
-cd "$HWE_REPO"
-```
+Before installing or changing HWE, confirm any parameter that is not already explicit in the request:
 
-If installing from GitHub, clone the public repo first:
+- Install directory for `HWE_REPO`.
+- Local `HWE_CONFIG` path and whether to create a new config or reuse an existing one.
+- `default_workspace_root` for generated/managed projects.
+- Project storage backend: SQLite or an owner-approved PostgreSQL service.
+- Hermes user skill directory and any per-profile skill directories that also need the `hwe` skill.
+- Whether existing skill directories may be overwritten by the public repo copy.
+- API/UI host and ports if starting the console.
+- Whether to run the smoke workflow and whether to archive/remove it afterward.
+
+## 1. Clone Or Update The Public HWE Repo
+
+For a new install, clone the public repo into the owner-approved directory:
 
 ```bash
 export HWE_REPO=${HWE_REPO:-$HOME/workflow-engine}
@@ -21,15 +29,16 @@ git clone https://github.com/radezheng/workflow-engine.git "$HWE_REPO"
 cd "$HWE_REPO"
 ```
 
-If updating an existing checkout, preserve local changes and only fast-forward:
+For an existing install, verify it is the public repo before updating:
 
 ```bash
 cd "$HWE_REPO"
+git remote get-url origin
 git status --short
 git pull --ff-only
 ```
 
-If `git status --short` shows local changes, stop and ask the user whether to commit, stash, or keep the local checkout unchanged.
+If `origin` is not `https://github.com/radezheng/workflow-engine.git`, or `git status --short` shows local changes, stop and ask the owner how to proceed. Do not run destructive git commands.
 
 ## 2. Install HWE Locally
 
@@ -67,7 +76,7 @@ For a new machine, initialize a local config. Keep this file local and do not co
 export HWE_CONFIG=$PWD/hwe.config.yaml
 ```
 
-If a config already exists, point HWE at it:
+If a config already exists and the owner wants to reuse it, point HWE at it:
 
 ```bash
 export HWE_CONFIG=/path/to/hwe.config.yaml
@@ -77,7 +86,7 @@ Machine-specific values belong in `hwe.config.yaml` or environment variables: wo
 
 ## 4. Install The HWE Skill Into Hermes
 
-This repo carries the project skill at `.agents/skills/hwe`. Install it into the active Hermes user skill directory:
+This repo carries the project skill at `.agents/skills/hwe`. After owner approval to overwrite the target skill copy, install it into the active Hermes user skill directory:
 
 ```bash
 mkdir -p "$HOME/.hermes/skills"
@@ -86,13 +95,13 @@ rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' \
   "$HOME/.hermes/skills/hwe/"
 ```
 
-If the target already exists and may have local changes, compare before overwriting:
+If the target already exists and overwrite permission is unclear, compare first and ask the owner:
 
 ```bash
 diff -ru "$HOME/.hermes/skills/hwe" "$HWE_REPO/.agents/skills/hwe" || true
 ```
 
-If HWE will dispatch work to multiple Hermes profiles, verify each target profile can discover every required skill. When a profile has its own configured skill directory, copy the full skill directory there too. Preserve `SKILL.md`, `scripts/`, `references/`, frontmatter, and relative layout.
+If HWE will dispatch work to multiple Hermes profiles, verify each target profile can discover every required skill. When a profile has its own configured skill directory and the owner approves syncing it, copy the full skill directory there too. Preserve `SKILL.md`, `scripts/`, `references/`, frontmatter, and relative layout.
 
 ## 5. Run HWE Doctor
 
@@ -121,13 +130,15 @@ Ask the user before changing credentials, ports, database/container lifecycle, s
 
 Use this checklist when the user asks Hermes to update HWE:
 
-1. Set `HWE_REPO`, `HWE`, `HWE_PYTHON`, and `HWE_CONFIG`.
-2. Run `git status --short`; ask before touching local changes.
-3. Run `git pull --ff-only`.
-4. Reinstall with `python -m pip install -e .` inside `.venv`.
-5. Sync `.agents/skills/hwe/` into every Hermes profile skill directory that needs it.
-6. Run doctor and resolve `FAIL` findings before mutating workflow state.
-7. Restart `hwe serve` if the API is running and source/config changed.
+1. Confirm owner-approved install/config/skill parameters.
+2. Set `HWE_REPO`, `HWE`, `HWE_PYTHON`, and `HWE_CONFIG`.
+3. Verify `origin` is `https://github.com/radezheng/workflow-engine.git`.
+4. Run `git status --short`; ask before touching local changes.
+5. Run `git pull --ff-only`.
+6. Reinstall with `python -m pip install -e .` inside `.venv`.
+7. Sync `.agents/skills/hwe/` into every approved Hermes profile skill directory that needs it.
+8. Run doctor and resolve `FAIL` findings before mutating workflow state.
+9. Restart `hwe serve` if the API is running and source/config changed.
 
 ## 6. Start Optional Local Console
 
