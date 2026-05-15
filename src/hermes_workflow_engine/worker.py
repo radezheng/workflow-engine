@@ -125,7 +125,8 @@ class WorkerAdapter:
         elif not isinstance(extra_args, list):
             extra_args = []
 
-        return [*base_command, "chat", "-Q", "--source", "workflow-engine", *[str(arg) for arg in extra_args], "-q", prompt_text]
+        profile_args = _hermes_profile_args(base_command, hermes_profile, extra_args)
+        return [*base_command, "chat", *profile_args, "-Q", "--source", "workflow-engine", *[str(arg) for arg in extra_args], "-q", prompt_text]
 
     def hermes_command_preview(self, profile_name: str, prompt_text: str) -> list[str]:
         profile_config = self._profile_config(profile_name)
@@ -266,6 +267,17 @@ def _config_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def _hermes_profile_args(base_command: list[str], hermes_profile: str, extra_args: list[Any]) -> list[str]:
+    if not hermes_profile:
+        return []
+    combined_args = [str(arg) for arg in [*base_command[1:], *extra_args]]
+    if "-p" in combined_args or "--profile" in combined_args or any(arg.startswith("--profile=") for arg in combined_args):
+        return []
+    if base_command and Path(base_command[0]).name == hermes_profile:
+        return []
+    return ["-p", hermes_profile]
 
 
 def _switch_commands(profile_config: dict[str, Any]) -> list[dict[str, Any]]:

@@ -112,7 +112,7 @@ workitem_id
 title
 kind: intake | design | code | test | review | command | acceptance | approval | info_request
 profile: planner | coder | reviewer | qa | command
-status: pending | ready | claimed | running | waiting_for_info | waiting_for_approval | validating | succeeded | failed | stale | cancelled
+status: pending | ready | running | waiting_for_info | waiting_for_approval | validating | succeeded | failed | stale | cancelled
 dependencies
 locks
 context_contract
@@ -414,7 +414,6 @@ superseded
 ```text
 pending
   -> ready
-  -> claimed
   -> running
   -> validating
   -> succeeded

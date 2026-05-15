@@ -6,6 +6,11 @@ default_workspace_root: ~/workspaces/hermes
 # hwe.config.yaml. If you use a config elsewhere, adjust it relative to that file.
 prompt_template_root: ./ptemplate
 
+# Workflow templates integrate profiles, prompt-template refs, task specs,
+# parameters, materialization rules, and nested workflow references. Built-in
+# templates ship with HWE; this root is for config-level overrides/additions.
+workflow_template_root: ./workflow_templates
+
 # SQLite project storage is the default when project_database is omitted.
 # Use PostgreSQL only when the owner approves the service, credentials, and schema.
 # project_database:
@@ -34,7 +39,7 @@ ai_providers:
 profiles:
   designer:
     hermes_profile: designer
-    hermes_command: designer
+    hermes_command: hermes
     hermes_args: [--accept-hooks]
     timeout_seconds: 600
     healthcheck:
@@ -46,7 +51,7 @@ profiles:
 
   coder:
     hermes_profile: coder
-    hermes_command: coder
+    hermes_command: hermes
     hermes_args: [--accept-hooks]
     success_exit_codes: [0]
     healthcheck:
@@ -58,7 +63,7 @@ profiles:
 
   reviewer:
     hermes_profile: reviewer
-    hermes_command: reviewer
+    hermes_command: hermes
     hermes_args: [--accept-hooks]
     timeout_seconds: 600
     healthcheck:

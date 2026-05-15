@@ -32,6 +32,7 @@ Worker role templates:
 - `coder/implementation-slice.md`: implement one focused feature slice.
 - `coder/fix-slice.md`: repair one specific failure with minimal blast radius.
 - `reviewer/implementation-review.md`: review implementation risk and regressions.
+- `reviewer/planning-review.md`: review plan/design/task-breakdown sources before materialization.
 - `reviewer/acceptance-review.md`: final acceptance against requirements and evidence.
 - `reviewer/runtime-smoke.md`: runtime smoke review for runnable applications.
 - `qa/test-plan.md`: design deterministic test and smoke coverage.

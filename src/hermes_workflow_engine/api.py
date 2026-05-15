@@ -14,6 +14,20 @@ from .ai import AIProviderError, AssistTarget, create_ai_assist_response, list_a
 from .config import ConfigError, HWEConfig, load_config
 from .project_runtime import ProjectRuntime
 from .project_storage import ProjectStorage, ProjectStorageError, resolve_project_root
+from .workflow_templates import (
+    DEFAULT_WORKFLOW_TEMPLATE_ID,
+    WorkflowTemplateError,
+    get_workflow_template,
+    list_workflow_templates,
+    materialize_task_spec,
+    nested_workflows_text,
+    planning_task_spec,
+    review_task_specs,
+    render_materialize_prompt,
+    resolve_workflow_template,
+    workflow_materialize_action,
+    workflow_stage_created_reason,
+)
 
 
 PROJECT_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -52,14 +66,18 @@ class RunTaskRequest(BaseModel):
 
 class PlanWorkitemRequest(BaseModel):
     project_id: str | None = None
-    planner_profile: str = "designer"
-    prompt_template_ref: str = "designer/workitem-plan"
+    workflow_template_id: str = DEFAULT_WORKFLOW_TEMPLATE_ID
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    planner_profile: str | None = None
+    prompt_template_ref: str | None = None
 
 
 class MaterializePlanRequest(BaseModel):
     project_id: str | None = None
-    profile: str = "designer"
-    prompt_template_ref: str = "designer/task-breakdown"
+    workflow_template_id: str = DEFAULT_WORKFLOW_TEMPLATE_ID
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    profile: str | None = None
+    prompt_template_ref: str | None = None
     prompt_text: str | None = None
 
 
@@ -169,6 +187,7 @@ def config_status() -> dict[str, Any]:
         "exists": bool(config.source_path and config.source_path.exists()),
         "default_workspace_root": str(config.default_workspace_root) if config.default_workspace_root else None,
         "prompt_template_root": str(config.prompt_template_root) if config.prompt_template_root else None,
+        "workflow_template_root": str(config.workflow_template_root) if config.workflow_template_root else None,
         "project_database": project_database_status,
         "profiles": sorted((config.profiles or {}).keys()),
         "ai_providers": [provider["name"] for provider in list_ai_providers(config)],
@@ -282,9 +301,9 @@ def restore_project(project_ref: str, project_id: str | None = None) -> dict[str
 
 
 @app.get("/api/projects/{project_ref}/workitems")
-def list_workitems(project_ref: str, project_id: str | None = None) -> list[dict[str, Any]]:
+def list_workitems(project_ref: str, project_id: str | None = None, include_archived: bool = False) -> list[dict[str, Any]]:
     storage = _storage(project_ref)
-    return storage.list_workitems(_project_id(project_ref, project_id))
+    return storage.list_workitems(_project_id(project_ref, project_id), include_archived=include_archived)
 
 
 @app.post("/api/projects/{project_ref}/workitems")
@@ -305,9 +324,26 @@ def create_workitem(project_ref: str, request: WorkitemCreateRequest) -> dict[st
     )
 
 
+@app.post("/api/projects/{project_ref}/workitems/{workitem_id}/archive")
+def archive_workitem(project_ref: str, workitem_id: str, project_id: str | None = None) -> dict[str, Any]:
+    storage = _storage(project_ref)
+    if storage.get_workitem(workitem_id)["project_id"] != _project_id(project_ref, project_id):
+        raise HTTPException(status_code=404, detail="Workitem does not belong to project.")
+    return storage.archive_workitem(workitem_id)
+
+
+@app.post("/api/projects/{project_ref}/workitems/{workitem_id}/restore")
+def restore_workitem(project_ref: str, workitem_id: str, project_id: str | None = None) -> dict[str, Any]:
+    storage = _storage(project_ref)
+    if storage.get_workitem(workitem_id)["project_id"] != _project_id(project_ref, project_id):
+        raise HTTPException(status_code=404, detail="Workitem does not belong to project.")
+    return storage.restore_workitem(workitem_id)
+
+
 @app.get("/api/projects/{project_ref}/workitems/{workitem_id}/dashboard")
 def workitem_dashboard(project_ref: str, workitem_id: str, project_id: str | None = None) -> dict[str, Any]:
     storage = _storage(project_ref)
+    config = _config()
     resolved_project_id = _project_id(project_ref, project_id)
     workitem = storage.get_workitem(workitem_id)
     if workitem["project_id"] != resolved_project_id:
@@ -315,6 +351,8 @@ def workitem_dashboard(project_ref: str, workitem_id: str, project_id: str | Non
     workflows = storage.list_workflows(resolved_project_id, workitem_id=workitem_id)
     current_workflow = storage.get_workflow(workitem["current_workflow_id"]) if workitem.get("current_workflow_id") else None
     tasks = storage.list_tasks(current_workflow["id"]) if current_workflow else []
+    templates = _resolved_workflow_templates(config, storage)
+    tasks = [_with_workflow_actions(task, templates) for task in tasks]
     runs = storage.list_task_runs(workflow_id=current_workflow["id"], limit=100) if current_workflow else []
     human_actions = storage.list_human_actions(resolved_project_id)
     events = storage.list_events(resolved_project_id, limit=100)
@@ -334,6 +372,14 @@ def workitem_dashboard(project_ref: str, workitem_id: str, project_id: str | Non
 def list_workflows(project_ref: str, project_id: str | None = None, workitem_id: str | None = None) -> list[dict[str, Any]]:
     storage = _storage(project_ref)
     return storage.list_workflows(_project_id(project_ref, project_id), workitem_id=workitem_id)
+
+
+@app.get("/api/projects/{project_ref}/workflow-templates")
+def list_project_workflow_templates(project_ref: str, project_id: str | None = None) -> list[dict[str, Any]]:
+    storage = _storage(project_ref)
+    resolved_project_id = _project_id(project_ref, project_id)
+    storage.get_project(resolved_project_id)
+    return _resolved_workflow_templates(_config(), storage)
 
 
 @app.get("/api/projects/{project_ref}/workflows/{workflow_id}/tasks")
@@ -444,27 +490,60 @@ def plan_workitem(project_ref: str, workitem_id: str, request: PlanWorkitemReque
     workitem = storage.get_workitem(workitem_id)
     if workitem["project_id"] != project_id:
         raise HTTPException(status_code=404, detail="Workitem does not belong to project.")
-    prompt_template_ref = _validate_prompt_template_ref(request.prompt_template_ref)
+    template = _resolved_workflow_template(config, storage, request.workflow_template_id, request.parameters)
+    plan_spec = planning_task_spec(template)
+    planner_profile = request.planner_profile or str(plan_spec.get("profile") or "")
+    prompt_template_ref = _validate_prompt_template_ref(request.prompt_template_ref or str(plan_spec.get("prompt_template_ref") or ""))
+    if not planner_profile:
+        raise HTTPException(status_code=400, detail=f"Workflow template `{template['id']}` planning task has no profile.")
     if not _prompt_template_exists(storage, config, prompt_template_ref):
         raise HTTPException(status_code=400, detail=f"Prompt template not found: {prompt_template_ref}")
-    workflow = storage.get_workflow(workitem["current_workflow_id"]) if workitem.get("current_workflow_id") else storage.create_workflow(project_id, workitem_id, planner_profile=request.planner_profile)
+    workflow = storage.get_workflow(workitem["current_workflow_id"]) if workitem.get("current_workflow_id") else storage.create_workflow(project_id, workitem_id, planner_profile=planner_profile)
     tasks = storage.list_tasks(workflow["id"])
-    planner_task = next((task for task in tasks if task.get("prompt_template_ref") == prompt_template_ref), None)
+    created_reason = workflow_stage_created_reason(template["id"], str(plan_spec.get("stage", "planning")))
+    planner_task = next((task for task in tasks if task.get("created_reason") == created_reason), None)
     if planner_task is None:
         planner_task = storage.create_task(
             workflow["id"],
-            "规划 workitem",
-            kind="planning",
-            profile=request.planner_profile,
+            str(plan_spec.get("title") or "规划 workitem"),
+            kind=str(plan_spec.get("kind") or "planning"),
+            profile=planner_profile,
             prompt_template_ref=prompt_template_ref,
-            prompt_text="为这个 workitem 制定执行策略，并提出后续 task-breakdown 可物化的任务候选。不要在本 planning 任务中直接创建实现/评审任务。",
-            skills=["hwe"],
-            outputs=["工作流计划", "任务图候选"],
-            gates=["计划覆盖需求", "任务候选包含角色和依赖", "包含验证任务建议"],
-            priority=10,
+            prompt_text=str(plan_spec.get("prompt_text") or ""),
+            skills=_string_list(plan_spec.get("skills"), default=["hwe"]),
+            outputs=_string_list(plan_spec.get("outputs")),
+            gates=_string_list(plan_spec.get("gates")),
+            priority=_int_value(plan_spec.get("priority"), 10),
             risk_level=workitem["risk_level"],
             created_by="hwe-api",
-            created_reason="plan-workitem",
+            created_reason=created_reason,
+        )
+    for review_spec in review_task_specs(template):
+        review_stage = str(review_spec.get("stage") or "planning-review")
+        review_created_reason = workflow_stage_created_reason(template["id"], review_stage)
+        if any(task.get("created_reason") == review_created_reason for task in storage.list_tasks(workflow["id"])):
+            continue
+        review_profile = str(review_spec.get("profile") or "")
+        review_prompt_template_ref = _validate_prompt_template_ref(str(review_spec.get("prompt_template_ref") or ""))
+        if not review_profile:
+            raise HTTPException(status_code=400, detail=f"Workflow template `{template['id']}` review task `{review_stage}` has no profile.")
+        if not _prompt_template_exists(storage, config, review_prompt_template_ref):
+            raise HTTPException(status_code=400, detail=f"Prompt template not found: {review_prompt_template_ref}")
+        storage.create_task(
+            workflow["id"],
+            str(review_spec.get("title") or "Review plan"),
+            kind=str(review_spec.get("kind") or "review"),
+            profile=review_profile,
+            depends_on=[planner_task["id"]],
+            prompt_template_ref=review_prompt_template_ref,
+            prompt_text=str(review_spec.get("prompt_text") or ""),
+            skills=_string_list(review_spec.get("skills"), default=["hwe"]),
+            outputs=_string_list(review_spec.get("outputs")),
+            gates=_string_list(review_spec.get("gates")),
+            priority=planner_task["priority"] + _int_value(review_spec.get("priority_offset"), 1),
+            risk_level=workitem["risk_level"],
+            created_by="hwe-api",
+            created_reason=review_created_reason,
         )
     return {"workflow": workflow, "task": planner_task, "tasks": storage.list_tasks(workflow["id"])}
 
@@ -528,6 +607,9 @@ def materialize_plan(project_ref: str, task_id: str, request: MaterializePlanReq
     project_id = _project_id(project_ref, request.project_id)
     if task["project_id"] != project_id:
         raise HTTPException(status_code=404, detail="Task does not belong to project.")
+    template = _resolved_workflow_template(config, storage, request.workflow_template_id, request.parameters)
+    if workflow_materialize_action(template, task) is None:
+        raise HTTPException(status_code=400, detail=f"Task is not a materialization source for workflow template `{template['id']}`.")
     runs = storage.list_task_runs(task_id=task_id, limit=20)
     run = next((item for item in runs if item["status"] == "succeeded" and item.get("stdout_path")), None)
     if run is None:
@@ -536,7 +618,22 @@ def materialize_plan(project_ref: str, task_id: str, request: MaterializePlanReq
     _ensure_inside(stdout_path, storage.engine_dir)
     if not stdout_path.exists():
         raise HTTPException(status_code=400, detail="Plan task stdout log is missing.")
-    prompt_template_ref = _validate_prompt_template_ref(request.prompt_template_ref)
+    review_stdout_path: Path | None = None
+    dependency_ids = storage.list_task_dependencies(task_id)
+    if dependency_ids:
+        dependency_runs = storage.list_task_runs(task_id=dependency_ids[0], limit=20)
+        dependency_run = next((item for item in dependency_runs if item["status"] == "succeeded" and item.get("stdout_path")), None)
+        if dependency_run:
+            review_stdout_path = stdout_path
+            stdout_path = Path(str(dependency_run["stdout_path"]))
+            _ensure_inside(stdout_path, storage.engine_dir)
+            if not stdout_path.exists():
+                raise HTTPException(status_code=400, detail="Reviewed plan task stdout log is missing.")
+    task_spec = materialize_task_spec(template)
+    profile = request.profile or str(task_spec.get("profile") or "")
+    prompt_template_ref = _validate_prompt_template_ref(request.prompt_template_ref or str(task_spec.get("prompt_template_ref") or ""))
+    if not profile:
+        raise HTTPException(status_code=400, detail=f"Workflow template `{template['id']}` materialize task has no profile.")
     if not _prompt_template_exists(storage, config, prompt_template_ref):
         raise HTTPException(status_code=400, detail=f"Prompt template not found: {prompt_template_ref}")
     existing = storage.list_tasks(task["workflow_id"])
@@ -545,17 +642,31 @@ def materialize_plan(project_ref: str, task_id: str, request: MaterializePlanReq
     if existing_task:
         return {"created": [], "skipped": [existing_task], "tasks": storage.list_tasks(task["workflow_id"])}
     workitem = storage.get_workitem(task["workitem_id"])
+    prompt_text = request.prompt_text or render_materialize_prompt(
+        template,
+        {
+            "project_root": str(storage.project_root),
+            "project_id": project_id,
+            "workitem_id": workitem["id"],
+            "workitem_title": workitem["title"],
+            "workflow_id": task["workflow_id"],
+            "source_task_id": task["id"],
+            "stdout_path": str(stdout_path),
+            "review_stdout_path": str(review_stdout_path) if review_stdout_path else "无",
+            "child_workflows": nested_workflows_text(template),
+        },
+    )
     created = storage.create_task(
         task["workflow_id"],
-        "将 plan 物化为可执行任务",
-        kind="planning",
-        profile=request.profile,
+        str(task_spec.get("title") or "将 plan 物化为可执行任务"),
+        kind=str(task_spec.get("kind") or "planning"),
+        profile=profile,
         prompt_template_ref=prompt_template_ref,
-        prompt_text=request.prompt_text or _plan_breakdown_prompt(storage.project_root, project_id, workitem, task, stdout_path),
-        outputs=["已创建 HWE 任务图"],
-        gates=["已阅读 plan/design 文件", "任务使用正确角色和依赖创建", "包含验证任务建议"],
-        skills=["hwe"],
-        priority=task["priority"] + 1,
+        prompt_text=prompt_text,
+        outputs=_string_list(task_spec.get("outputs")),
+        gates=_string_list(task_spec.get("gates")),
+        skills=_string_list(task_spec.get("skills"), default=["hwe"]),
+        priority=task["priority"] + _int_value(task_spec.get("priority_offset"), 1),
         risk_level=task["risk_level"],
         created_by="hwe-api",
         created_reason=created_reason,
@@ -597,9 +708,48 @@ def _storage(project_ref: str) -> ProjectStorage:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _resolved_workflow_templates(config: HWEConfig, storage: ProjectStorage) -> list[dict[str, Any]]:
+    try:
+        return [resolve_workflow_template(template) for template in list_workflow_templates(config, project_root=storage.project_root)]
+    except WorkflowTemplateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _resolved_workflow_template(config: HWEConfig, storage: ProjectStorage, template_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return resolve_workflow_template(get_workflow_template(config, template_id, project_root=storage.project_root), parameters)
+    except WorkflowTemplateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _with_workflow_actions(task: dict[str, Any], templates: list[dict[str, Any]]) -> dict[str, Any]:
+    actions: dict[str, Any] = {}
+    for template in templates:
+        action = workflow_materialize_action(template, task)
+        if action:
+            actions["materialize_plan"] = action
+            break
+    if not actions:
+        return task
+    return {**task, "workflow_actions": actions}
+
+
+def _string_list(value: Any, *, default: list[str] | None = None) -> list[str]:
+    if value is None:
+        return list(default or [])
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def _int_value(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _ai_assist_context(config: HWEConfig, target: AssistTarget, raw_context: dict[str, Any]) -> dict[str, Any]:
-    if target != "workitem":
-        return {}
     project_ref = raw_context.get("project_ref")
     if not isinstance(project_ref, str) or not project_ref.strip():
         return {}
@@ -613,6 +763,13 @@ def _ai_assist_context(config: HWEConfig, target: AssistTarget, raw_context: dic
         storage.initialize()
         resolved_project_id = _project_id(project_ref, project_id)
         project = storage.get_project(resolved_project_id)
+        if target == "human_action":
+            action_id = raw_context.get("action_id")
+            if not isinstance(action_id, str) or not action_id.strip():
+                return {}
+            return _human_action_assist_context(storage, project, action_id.strip())
+        if target != "workitem":
+            return {}
         workitems = storage.list_workitems(resolved_project_id)
         return _workitem_assist_context(storage, project, workitems)
     except ProjectStorageError as exc:
@@ -663,6 +820,94 @@ def _workitem_assist_context(storage: ProjectStorage, project: dict[str, Any], w
         },
         "existing_workitems": summarized_workitems,
         "limits": {"workitems": 20, "tasks_per_workitem": 12, "text_chars": 600},
+    }
+
+
+def _human_action_assist_context(storage: ProjectStorage, project: dict[str, Any], action_id: str) -> dict[str, Any]:
+    action = storage.get_human_action(action_id)
+    if action["project_id"] != project["id"]:
+        raise ProjectStorageError("Human action does not belong to project.")
+    workitem = storage.get_workitem(action["workitem_id"]) if action.get("workitem_id") else None
+    workflow_id = action.get("workflow_id") or (workitem or {}).get("current_workflow_id")
+    tasks = storage.list_tasks(workflow_id, update_readiness=False) if workflow_id else []
+    task_runs = storage.list_task_runs(workflow_id=workflow_id, limit=20) if workflow_id else []
+    events = storage.list_events(project["id"], limit=30)
+    return {
+        "project": {
+            "id": project["id"],
+            "name": project["name"],
+            "status": project["status"],
+        },
+        "workitem": _summarize_workitem_for_assist(workitem) if workitem else None,
+        "human_action": {
+            "id": action["id"],
+            "kind": action["kind"],
+            "status": action["status"],
+            "title": action["title"],
+            "body": _clip_context_text(action.get("body"), 1200),
+            "questions": action.get("questions", []),
+            "options": action.get("options", []),
+            "evidence": action.get("evidence", []),
+            "requested_by": action.get("requested_by"),
+            "task_id": action.get("task_id"),
+            "run_id": action.get("run_id"),
+        },
+        "workflow": {
+            "id": workflow_id,
+            "tasks": [
+                {
+                    "id": task["id"],
+                    "title": task["title"],
+                    "kind": task["kind"],
+                    "profile": task.get("profile"),
+                    "status": task["status"],
+                    "prompt_template_ref": task.get("prompt_template_ref"),
+                    "prompt_text": _clip_context_text(task.get("prompt_text"), 500) if task.get("prompt_text") else "",
+                }
+                for task in tasks[:20]
+            ],
+            "task_runs": [
+                {
+                    "id": run["id"],
+                    "task_id": run["task_id"],
+                    "status": run["status"],
+                    "profile": run.get("profile"),
+                    "started_at": run.get("started_at"),
+                    "ended_at": run.get("ended_at"),
+                    "stdout_path": run.get("stdout_path"),
+                    "stderr_path": run.get("stderr_path"),
+                    "prompt_path": run.get("prompt_path"),
+                }
+                for run in task_runs[:12]
+            ],
+        },
+        "recent_events": [
+            {
+                "id": event["id"],
+                "type": event["type"],
+                "task_id": event.get("task_id"),
+                "run_id": event.get("run_id"),
+                "human_action_id": event.get("human_action_id"),
+                "created_at": event.get("created_at"),
+                "payload": event.get("payload", {}),
+            }
+            for event in events[:30]
+        ],
+        "limits": {"tasks": 20, "task_runs": 12, "events": 30, "text_chars": 1200},
+    }
+
+
+def _summarize_workitem_for_assist(workitem: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": workitem["id"],
+        "title": workitem["title"],
+        "type": workitem["type"],
+        "status": workitem["status"],
+        "priority": workitem["priority"],
+        "risk_level": workitem["risk_level"],
+        "requirements": _clip_context_text(workitem.get("requirements_md"), 1200) if workitem.get("requirements_md") else "",
+        "constraints": _clip_context_text(workitem.get("constraints_md"), 1200) if workitem.get("constraints_md") else "",
+        "current_workflow_id": workitem.get("current_workflow_id"),
     }
 
 
@@ -722,29 +967,6 @@ def _prompt_template_exists(storage: ProjectStorage, config: HWEConfig, prompt_t
         config.prompt_template_root / relative_path if config.prompt_template_root else None,
     ]
     return any(candidate.exists() for candidate in candidates if candidate is not None)
-
-
-def _plan_breakdown_prompt(project_root: Path, project_id: str, workitem: dict[str, Any], plan_task: dict[str, Any], stdout_path: Path) -> str:
-    return "\n".join(
-        [
-            "读取已完成的 workitem plan/design 文件，并将其拆解为可执行的 HWE Task 记录。",
-            "",
-            f"项目根目录：{project_root}",
-            f"Project id：{project_id}",
-            f"Workitem id：{workitem['id']}",
-            f"Workitem 标题：{workitem['title']}",
-            f"Workflow id：{plan_task['workflow_id']}",
-            f"源 planning/design task id：{plan_task['id']}",
-            f"Plan stdout 路径：{stdout_path}",
-            "",
-            "以 plan/design 文件为事实来源，不要只根据本 prompt 摘要推断任务。",
-            "从 workflow-engine 环境运行 `hwe task create` 创建聚焦的 HWE 任务。",
-            "先验证 HWE config 中实际存在的 profiles；只把任务分配给真实可路由、技能和模板可用的 profile。",
-            "为每一步选择合适的 prompt template；必要时创建项目本地 override 到 `.engine/prompt-templates/<role>/<name>.md`。",
-            "保留 plan/design 中的依赖关系，加入能证明完成的 gates/outputs。",
-            "如果 plan/design 文件信息不足以安全创建任务，请请求 human action，不要猜测。",
-        ]
-    )
 
 
 def _list_file_prompt_templates(root: Path, *, source: str, role: str | None = None) -> list[dict[str, Any]]:

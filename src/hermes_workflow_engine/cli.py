@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .config import ConfigError, HWEConfig, configured_config_path, load_config, write_config
+from .doctor import Doctor
 from .project_runtime import ProjectRuntime
 from .runtime import WorkflowRuntime
 from .spec import SpecError, load_workflow
@@ -37,6 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8711)
     serve_parser.add_argument("--reload", action="store_true")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check HWE repo, config, project database, profiles, and local services.")
+    doctor_parser.add_argument("--repo", type=Path, default=None)
+    doctor_parser.add_argument("--config", type=Path, default=None)
+    doctor_parser.add_argument("--fix", action="store_true", help="Apply safe local fixes such as creating configured directories.")
 
     run_workitem_parser = subparsers.add_parser("run-workitem", help="Run ready tasks for a project work item.")
     run_workitem_parser.add_argument("project")
@@ -121,13 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     task_list = task_subparsers.add_parser("list", help="List tasks in a workflow.")
     task_list.add_argument("project")
     task_list.add_argument("workflow_id")
-    task_claim = task_subparsers.add_parser("claim", help="Claim the next ready task.")
+    task_claim = task_subparsers.add_parser("claim", help="Start the next ready task and mark it running.")
     task_claim.add_argument("project")
     task_claim.add_argument("workflow_id")
     task_claim.add_argument("--worker-id", required=True)
     task_claim.add_argument("--profile", default=None)
     task_claim.add_argument("--lease-seconds", type=int, default=900)
-    task_release = task_subparsers.add_parser("release", help="Release an abandoned claimed task back to ready.")
+    task_release = task_subparsers.add_parser("release", help="Release an abandoned running task back to ready.")
     task_release.add_argument("project")
     task_release.add_argument("task_id")
     task_release.add_argument("--reason", default="released")
@@ -135,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     task_retry.add_argument("project")
     task_retry.add_argument("task_id")
     task_retry.add_argument("--reason", default="retry")
-    task_complete = task_subparsers.add_parser("complete", help="Complete a claimed task.")
+    task_complete = task_subparsers.add_parser("complete", help="Complete a running task.")
     task_complete.add_argument("project")
     task_complete.add_argument("task_id")
     task_complete.add_argument("--status", default="succeeded", choices=["succeeded", "failed", "cancelled", "skipped", "superseded", "waiting_for_info", "waiting_for_approval"])
@@ -154,6 +160,21 @@ def main(argv: list[str] | None = None) -> int:
     human_action_list.add_argument("--project-id", default=None)
     human_action_list.add_argument("--status", default=None)
     human_action_list.add_argument("--kind", default=None, choices=["info_request", "approval_request"])
+    human_action_create = human_action_subparsers.add_parser("create", help="Create a human information or approval request.")
+    human_action_create.add_argument("project")
+    human_action_create.add_argument("title")
+    human_action_create.add_argument("--project-id", default=None)
+    human_action_create.add_argument("--kind", default="info_request", choices=["info_request", "approval_request"])
+    human_action_create.add_argument("--body", required=True)
+    human_action_create.add_argument("--workitem-id", default=None)
+    human_action_create.add_argument("--workflow-id", default=None)
+    human_action_create.add_argument("--task-id", default=None)
+    human_action_create.add_argument("--run-id", default=None)
+    human_action_create.add_argument("--conversation-id", default=None)
+    human_action_create.add_argument("--question", action="append", default=[])
+    human_action_create.add_argument("--option", action="append", default=[])
+    human_action_create.add_argument("--evidence", action="append", default=[])
+    human_action_create.add_argument("--requested-by", default=None)
     human_action_show = human_action_subparsers.add_parser("show", help="Show a human action.")
     human_action_show.add_argument("project")
     human_action_show.add_argument("human_action_id")
@@ -218,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_run_workitem(args)
         if args.command == "serve":
             return _handle_serve(args)
+        if args.command == "doctor":
+            return _handle_doctor(args)
 
         spec = load_workflow(args.workflow)
         storage = Storage(spec.engine_dir)
@@ -432,6 +455,25 @@ def _handle_human_action(args: argparse.Namespace) -> int:
     if command == "list":
         _print_json(storage.list_human_actions(project_id, status=args.status, kind=args.kind))
         return 0
+    if command == "create":
+        _print_json(
+            storage.create_human_action(
+                project_id,
+                kind=args.kind,
+                title=args.title,
+                body=args.body,
+                workitem_id=args.workitem_id,
+                workflow_id=args.workflow_id,
+                task_id=args.task_id,
+                run_id=args.run_id,
+                conversation_id=args.conversation_id,
+                questions=[{"id": f"q{index}", "question": question} for index, question in enumerate(args.question, start=1)],
+                options=args.option,
+                evidence=args.evidence,
+                requested_by=args.requested_by,
+            )
+        )
+        return 0
     if command == "show":
         action = storage.get_human_action(args.human_action_id)
         if action["project_id"] != project_id:
@@ -478,6 +520,10 @@ def _handle_serve(args: argparse.Namespace) -> int:
         raise ConfigError("Install HWE with API dependencies before running `hwe serve`.") from exc
     uvicorn.run("hermes_workflow_engine.api:app", host=args.host, port=args.port, reload=args.reload)
     return 0
+
+
+def _handle_doctor(args: argparse.Namespace) -> int:
+    return Doctor(repo=args.repo, config_path=args.config, fix=args.fix).run()
 
 
 def _project_storage(project: str) -> ProjectStorage:

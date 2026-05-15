@@ -15,19 +15,6 @@ type PlanMaterializeDialogProps = {
   onSubmit: () => void;
 };
 
-const fallbackTemplate: PromptTemplate = {
-  id: 'default:designer/task-breakdown',
-  source: 'public',
-  role: 'designer',
-  name: 'task-breakdown',
-  version: 'file',
-  description: '',
-  body_md: '',
-  tags: [],
-  path: '',
-  updated_at: 0,
-};
-
 export function PlanMaterializeDialog({
   task,
   templates,
@@ -42,10 +29,23 @@ export function PlanMaterializeDialog({
   const [mode, setMode] = useState<'edit' | 'preview'>('edit');
   const [selectedTemplateKey, setSelectedTemplateKey] = useState('');
   if (!task) return null;
+  const [fallbackRole, fallbackName] = promptTemplateRef.split('/');
+  const fallbackTemplate: PromptTemplate = {
+    id: `workflow-action:${promptTemplateRef}`,
+    source: 'public',
+    role: fallbackRole || 'workflow',
+    name: fallbackName || 'materialize',
+    version: 'file',
+    description: '',
+    body_md: '',
+    tags: [],
+    path: '',
+    updated_at: 0,
+  };
   const options = templates
     .filter((template) => template.role === 'designer' || template.role === 'planner')
     .sort((left, right) => `${left.role}/${left.name}/${left.source}`.localeCompare(`${right.role}/${right.name}/${right.source}`));
-  const displayOptions = options.some((template) => `${template.role}/${template.name}` === 'designer/task-breakdown')
+  const displayOptions = options.some((template) => `${template.role}/${template.name}` === promptTemplateRef)
     ? options
     : [fallbackTemplate, ...options];
   const templateKey = (template: PromptTemplate) => `${template.source}:${template.role}/${template.name}:${template.path}`;
@@ -106,19 +106,19 @@ export function PlanMaterializeDialog({
                 </div>
               </div>
               <div className="plan-breakdown-section">
-                <div className="plan-breakdown-section-title">Input</div>
+                <div className="plan-breakdown-section-title">Input Override</div>
                 {mode === 'edit' ? (
-                  <textarea className="plan-breakdown-input" value={promptText} onChange={(event) => onPromptTextChange(event.target.value)} rows={12} disabled={disabled} />
+                  <textarea className="plan-breakdown-input" value={promptText} onChange={(event) => onPromptTextChange(event.target.value)} rows={12} disabled={disabled} placeholder="Optional. Leave empty to let the backend render input from the workflow template." />
                 ) : (
                   <div className="plan-breakdown-preview input-body" aria-label="Input preview">
-                    <MarkdownPreview text={promptText} emptyText="No input preview available" />
+                    <MarkdownPreview text={promptText} emptyText="Backend will render the input from the workflow template." />
                   </div>
                 )}
               </div>
             </div>
             <div className="form-actions">
               <button type="button" className="secondary-button" disabled={disabled} onClick={onClose}>Cancel</button>
-              <button type="button" className="primary-button" disabled={disabled || !promptTemplateRef.trim() || !promptText.trim()} onClick={onSubmit}>
+              <button type="button" className="primary-button" disabled={disabled || !promptTemplateRef.trim()} onClick={onSubmit}>
                 <FileText size={15} />
                 Create Breakdown Task
               </button>

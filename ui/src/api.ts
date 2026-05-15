@@ -50,6 +50,32 @@ export type Task = {
   skills: string[];
   created_at: string;
   updated_at: string;
+  workflow_actions?: {
+    materialize_plan?: WorkflowAction;
+  };
+};
+
+export type WorkflowAction = {
+  workflow_template_id: string;
+  profile?: string | null;
+  prompt_template_ref?: string | null;
+  parameters?: Record<string, string>;
+};
+
+export type WorkflowTemplate = {
+  id: string;
+  name: string;
+  description?: string;
+  version?: string | number;
+  source: string;
+  path: string;
+  parameters: Record<string, { default?: string; description?: string } | string>;
+  profiles: Record<string, string>;
+  prompt_templates: Record<string, string>;
+  planning_task: Record<string, unknown>;
+  materialize?: Record<string, unknown>;
+  child_workflows?: Array<Record<string, unknown>>;
+  resolved_parameters?: Record<string, string>;
 };
 
 export type TaskRun = {
@@ -77,9 +103,19 @@ export type HumanAction = {
   status: string;
   title: string;
   body: string;
+  project_id?: string;
+  workitem_id: string | null;
+  workflow_id: string | null;
   task_id: string | null;
+  run_id: string | null;
+  questions: { id?: string; question?: string }[];
+  options: string[];
+  evidence: string[];
   requested_by: string | null;
   created_at: string;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  response?: Record<string, unknown> | null;
 };
 
 export type ConfigStatus = {
@@ -87,6 +123,7 @@ export type ConfigStatus = {
   exists: boolean;
   default_workspace_root: string | null;
   prompt_template_root: string | null;
+  workflow_template_root: string | null;
   project_database: {
     backend: string;
     host?: string;
@@ -251,8 +288,21 @@ export async function restoreProject(projectRef: string, projectId: string): Pro
   });
 }
 
-export async function getWorkitems(projectRef: string, projectId: string): Promise<Workitem[]> {
-  return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems?project_id=${encodeURIComponent(projectId)}`);
+export async function getWorkitems(projectRef: string, projectId: string, includeArchived = false): Promise<Workitem[]> {
+  const archivedQuery = includeArchived ? '&include_archived=true' : '';
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems?project_id=${encodeURIComponent(projectId)}${archivedQuery}`);
+}
+
+export async function archiveWorkitem(projectRef: string, projectId: string, workitemId: string): Promise<Workitem> {
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems/${encodeURIComponent(workitemId)}/archive?project_id=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  });
+}
+
+export async function restoreWorkitem(projectRef: string, projectId: string, workitemId: string): Promise<Workitem> {
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems/${encodeURIComponent(workitemId)}/restore?project_id=${encodeURIComponent(projectId)}`, {
+    method: 'POST',
+  });
 }
 
 export async function createWorkitem(projectRef: string, projectId: string, input: CreateWorkitemInput): Promise<Workitem> {
@@ -264,6 +314,10 @@ export async function createWorkitem(projectRef: string, projectId: string, inpu
 
 export async function getPromptTemplates(projectRef: string, projectId: string): Promise<PromptTemplate[]> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/prompt-templates?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export async function getWorkflowTemplates(projectRef: string, projectId: string): Promise<WorkflowTemplate[]> {
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/workflow-templates?project_id=${encodeURIComponent(projectId)}`);
 }
 
 export async function getPublicPromptTemplates(): Promise<PromptTemplate[]> {
@@ -314,10 +368,10 @@ export async function runTask(projectRef: string, projectId: string, taskId: str
   });
 }
 
-export async function planWorkitem(projectRef: string, projectId: string, workitemId: string, promptTemplateRef: string): Promise<{ workflow: Workflow; task: Task; tasks: Task[] }> {
+export async function planWorkitem(projectRef: string, projectId: string, workitemId: string, workflowTemplateId: string, parameters: Record<string, string> = {}): Promise<{ workflow: Workflow; task: Task; tasks: Task[] }> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems/${encodeURIComponent(workitemId)}/plan`, {
     method: 'POST',
-    body: JSON.stringify({ project_id: projectId, planner_profile: 'planner', prompt_template_ref: promptTemplateRef }),
+    body: JSON.stringify({ project_id: projectId, workflow_template_id: workflowTemplateId, parameters }),
   });
 }
 
@@ -325,7 +379,7 @@ export async function materializePlan(
   projectRef: string,
   projectId: string,
   taskId: string,
-  input: { prompt_template_ref: string; prompt_text: string; profile?: string },
+  input: { workflow_template_id: string; parameters?: Record<string, string>; prompt_template_ref?: string; prompt_text?: string; profile?: string | null },
 ): Promise<{ created: Task[]; skipped: Task[]; tasks: Task[] }> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/tasks/${encodeURIComponent(taskId)}/materialize-plan`, {
     method: 'POST',

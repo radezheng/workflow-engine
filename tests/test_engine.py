@@ -6,6 +6,7 @@ import yaml
 
 from hermes_workflow_engine import ai
 from hermes_workflow_engine.ai import create_ai_assist_response
+from hermes_workflow_engine.cli import main as cli_main
 from hermes_workflow_engine.config import HWEConfig, default_config_path, load_config
 from hermes_workflow_engine.project_storage import _postgres_connect_kwargs, _postgres_maxconn, _postgres_pool_key
 from hermes_workflow_engine.runtime import WorkflowRuntime
@@ -127,17 +128,48 @@ def test_prompt_template_root_defaults_to_hwe_config_directory(tmp_path: Path, m
     config = load_config()
 
     assert config.prompt_template_root == hwe_root / "ptemplate"
+    assert config.workflow_template_root == hwe_root / "workflow_templates"
 
 
 def test_prompt_template_root_config_is_relative_to_hwe_config_directory(tmp_path: Path) -> None:
     hwe_root = tmp_path / "hwe"
     hwe_root.mkdir()
     config_path = hwe_root / "hwe.config.yaml"
-    config_path.write_text("prompt_template_root: ./role-prompts\n", encoding="utf-8")
+    config_path.write_text("prompt_template_root: ./role-prompts\nworkflow_template_root: ./flows\n", encoding="utf-8")
 
     config = load_config(config_path)
 
     assert config.prompt_template_root == hwe_root / "role-prompts"
+    assert config.workflow_template_root == hwe_root / "flows"
+
+
+def test_doctor_cli_reports_config_and_repo(tmp_path: Path, capsys) -> None:
+        repo = tmp_path / "repo"
+        (repo / "src" / "hermes_workflow_engine").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\nname = 'hwe-test'\n", encoding="utf-8")
+        workspace = tmp_path / "workspace"
+        templates = tmp_path / "ptemplate"
+        workspace.mkdir()
+        (templates / "designer").mkdir(parents=True)
+        (templates / "designer" / "workitem-plan.md").write_text("Plan", encoding="utf-8")
+        config_path = tmp_path / "hwe.config.yaml"
+        config_path.write_text(
+                f"""
+default_workspace_root: {workspace}
+prompt_template_root: {templates}
+project_database:
+    backend: sqlite
+""",
+                encoding="utf-8",
+        )
+
+        assert cli_main(["doctor", "--repo", str(repo), "--config", str(config_path)]) == 0
+        output = capsys.readouterr().out
+
+        assert "HWE Doctor Report" in output
+        assert "[OK] repo" in output
+        assert "[OK] config" in output
+        assert "[OK] project_database: Using SQLite project storage." in output
 
 
 def test_hwe_config_loads_profile_preflight(tmp_path: Path) -> None:
@@ -147,7 +179,7 @@ def test_hwe_config_loads_profile_preflight(tmp_path: Path) -> None:
 profiles:
   coder:
     switch_command: lms unload --all
-    hermes_command: coder
+    hermes_command: hermes
     hermes_args: [--accept-hooks]
     success_exit_codes: [0, -6]
 """,
@@ -158,7 +190,7 @@ profiles:
 
     assert config.profile_config("coder") == {
         "switch_command": "lms unload --all",
-        "hermes_command": "coder",
+        "hermes_command": "hermes",
         "hermes_args": ["--accept-hooks"],
         "success_exit_codes": [0, -6],
     }
@@ -284,6 +316,37 @@ def test_ai_assist_uses_target_prompt_template_and_ready_flag(tmp_path: Path, mo
     assert captured["messages"][0]["content"] == "CUSTOM WORKITEM ASSISTANT PROMPT"
 
 
+def test_human_action_ai_assist_falls_back_from_decision_refusal(monkeypatch) -> None:
+    config = HWEConfig(
+        ai_providers={"local": {"type": "openai_compatible", "base_url": "http://127.0.0.1:1234/v1", "model": "local-model"}},
+    )
+
+    def fake_chat(_provider, _messages):
+        return '{"message":"Since I am an AI assistant helping you compose a response, I cannot make these project decisions on your behalf. Please let me know if you would like to accept the default suggestions.","ready":false,"draft":{"text":""}}'
+
+    monkeypatch.setattr(ai, "_chat_completion", fake_chat)
+
+    response = create_ai_assist_response(
+        config,
+        provider_name="local",
+        target="human_action",
+        messages=[{"role": "user", "content": "按你的理解回答"}],
+        draft={"text": "", "response_mode": "answer"},
+        context={
+            "human_action": {
+                "title": "确认信贷周期研究参数",
+                "body": "Confirm indicators, frontend stack React/Vite, and data update pipeline.",
+                "questions": [{"id": "q1", "question": "Use default indicators, React/Vite, and batch data updates?"}],
+                "options": ["Accept the default suggestions", "Change scope"],
+            }
+        },
+    )
+
+    assert response["ready"] is True
+    assert response["draft"]["text"].startswith("接受默认建议")
+    assert "Accept the default suggestions" in response["draft"]["text"]
+
+
 def test_hermes_profile_command_uses_current_cli_shape(tmp_path: Path) -> None:
     workflow_path = tmp_path / "workflow.yaml"
     prompt_path = tmp_path / "prompt.md"
@@ -299,7 +362,43 @@ def test_hermes_profile_command_uses_current_cli_shape(tmp_path: Path) -> None:
     adapter = WorkerAdapter(spec)
     command = adapter.hermes_command_preview("coder", "hello")
 
-    assert command == ["fake-hermes", "chat", "-Q", "--source", "workflow-engine", "--accept-hooks", "-q", "hello"]
+    assert command == ["fake-hermes", "chat", "-p", "coder", "-Q", "--source", "workflow-engine", "--accept-hooks", "-q", "hello"]
+
+
+def test_hermes_profile_wrapper_command_does_not_duplicate_profile(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("Do the work", encoding="utf-8")
+    workflow = {
+        "workflow": {"id": "test-flow", "workspace": str(tmp_path / "workspace")},
+        "profiles": {"coder": {"hermes_profile": "coder", "hermes_command": "coder", "hermes_args": ["--accept-hooks"]}},
+        "steps": [{"id": "agent", "kind": "agent", "profile": "coder", "prompt": str(prompt_path)}],
+    }
+    workflow_path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+
+    spec = load_workflow(workflow_path)
+    adapter = WorkerAdapter(spec)
+    command = adapter.hermes_command_preview("coder", "hello")
+
+    assert command == ["coder", "chat", "-Q", "--source", "workflow-engine", "--accept-hooks", "-q", "hello"]
+
+
+def test_hermes_default_profile_is_explicit_with_real_command(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("Do the work", encoding="utf-8")
+    workflow = {
+        "workflow": {"id": "test-flow", "workspace": str(tmp_path / "workspace")},
+        "profiles": {"default": {"hermes_profile": "default", "hermes_command": "fake-hermes"}},
+        "steps": [{"id": "agent", "kind": "agent", "profile": "default", "prompt": str(prompt_path)}],
+    }
+    workflow_path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+
+    spec = load_workflow(workflow_path)
+    adapter = WorkerAdapter(spec)
+    command = adapter.hermes_command_preview("default", "hello")
+
+    assert command == ["fake-hermes", "chat", "-p", "default", "-Q", "--source", "workflow-engine", "-q", "hello"]
 
 
 def test_static_worker_tolerates_profile_switch_failure_by_default(tmp_path: Path) -> None:

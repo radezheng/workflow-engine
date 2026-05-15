@@ -139,6 +139,71 @@ ai_providers:
     assert existing_workitem["current_workflow"]["tasks"][0]["title"] == "Implement dashboard shell"
 
 
+def test_api_human_action_ai_assist_includes_action_context(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    config_path = tmp_path / "hwe.config.yaml"
+    config_path.write_text(
+        f"""
+default_workspace_root: {workspace_root}
+ai_providers:
+  local-lms:
+    type: openai_compatible
+    base_url: http://127.0.0.1:1234/v1
+    model: local-model
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HWE_CONFIG", str(config_path))
+
+    storage = ProjectStorage(workspace_root / "delta")
+    storage.initialize()
+    storage.upsert_project("Delta Project", project_id="delta")
+    workitem = storage.create_workitem("delta", "Research credit cycles", requirements="Compare CN/US/JP credit cycles.")
+    workflow = storage.create_workflow("delta", workitem["id"], planner_profile="designer")
+    task = storage.create_task(workflow["id"], "Confirm indicators", kind="design", profile="designer", prompt_text="Ask for scope.")
+    action = storage.create_human_action(
+        "delta",
+        kind="info_request",
+        title="Confirm indicators",
+        body="Confirm credit cycle indicators before source research.",
+        workitem_id=workitem["id"],
+        workflow_id=workflow["id"],
+        task_id=task["id"],
+        questions=[{"id": "q1", "question": "Which indicators are in scope?"}],
+        options=["Credit/GDP", "Policy rates"],
+        requested_by="designer",
+    )
+
+    captured_context: dict[str, Any] = {}
+
+    def fake_assist(config, *, provider_name, target, messages, draft, context):
+        _ = config, provider_name, messages, draft
+        assert target == "human_action"
+        captured_context.update(context)
+        return {"message": "Drafted answer.", "draft": {"text": "Use Credit/GDP and policy rates."}, "ready": True, "raw": "{}"}
+
+    monkeypatch.setattr("hermes_workflow_engine.api.create_ai_assist_response", fake_assist)
+
+    response = TestClient(app).post(
+        "/api/ai/assist",
+        json={
+            "provider": "local-lms",
+            "target": "human_action",
+            "messages": [{"role": "user", "content": "Draft a concise answer"}],
+            "draft": {"text": ""},
+            "context": {"project_ref": "delta", "project_id": "delta", "action_id": action["id"]},
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured_context["project"]["id"] == "delta"
+    assert captured_context["workitem"]["title"] == "Research credit cycles"
+    assert captured_context["human_action"]["title"] == "Confirm indicators"
+    assert captured_context["human_action"]["questions"] == [{"id": "q1", "question": "Which indicators are in scope?"}]
+    assert captured_context["workflow"]["tasks"][0]["title"] == "Confirm indicators"
+
+
 def test_api_config_reports_project_database_without_password(tmp_path: Path, monkeypatch) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -213,6 +278,22 @@ def test_api_creates_project_and_workitem(tmp_path: Path, monkeypatch) -> None:
     assert workitems.status_code == 200
     assert workitems.json()[0]["id"] == workitem.json()["id"]
 
+    archived_workitem = client.post(f"/api/projects/gamma/workitems/{workitem.json()['id']}/archive", params={"project_id": "gamma"})
+    assert archived_workitem.status_code == 200
+    assert archived_workitem.json()["status"] == "archived"
+
+    active_workitems = client.get("/api/projects/gamma/workitems", params={"project_id": "gamma"})
+    assert active_workitems.status_code == 200
+    assert active_workitems.json() == []
+
+    all_workitems = client.get("/api/projects/gamma/workitems", params={"project_id": "gamma", "include_archived": "true"})
+    assert all_workitems.status_code == 200
+    assert all_workitems.json()[0]["id"] == workitem.json()["id"]
+
+    restored_workitem = client.post(f"/api/projects/gamma/workitems/{workitem.json()['id']}/restore", params={"project_id": "gamma"})
+    assert restored_workitem.status_code == 200
+    assert restored_workitem.json()["status"] == "ready"
+
     archived = client.post("/api/projects/gamma/archive", params={"project_id": "gamma"})
     assert archived.status_code == 200
     assert archived.json()["status"] == "archived"
@@ -236,9 +317,12 @@ def test_api_plans_workitem_by_creating_workflow_and_designer_task(tmp_path: Pat
     workspace_root.mkdir()
     template_root = tmp_path / "ptemplate"
     designer_root = template_root / "designer"
+    reviewer_root = template_root / "reviewer"
     designer_root.mkdir(parents=True)
+    reviewer_root.mkdir(parents=True)
     (designer_root / "workitem-plan.md").write_text("Plan this workitem.", encoding="utf-8")
     (designer_root / "task-breakdown.md").write_text("Break down tasks.", encoding="utf-8")
+    (reviewer_root / "planning-review.md").write_text("Review this plan.", encoding="utf-8")
     config_path = tmp_path / "hwe.config.yaml"
     config_path.write_text(
         f"""
@@ -255,6 +339,14 @@ prompt_template_root: {template_root}
     workitem = client.post("/api/projects/planner-project/workitems", json={"project_id": "planner-project", "title": "Add search", "risk_level": "low"})
     assert workitem.status_code == 200
 
+    templates = client.get("/api/projects/planner-project/workflow-templates", params={"project_id": "planner-project"})
+    assert templates.status_code == 200
+    software_template = next(item for item in templates.json() if item["id"] == "software-project-dev")
+    assert software_template["profiles"]["designer"] == "designer"
+    assert software_template["prompt_templates"]["workitem_plan"] == "designer/workitem-plan"
+    assert software_template["prompt_templates"]["planning_review"] == "reviewer/planning-review"
+    assert software_template["child_workflows"][0]["template"] == "qa-review"
+
     planned = client.post(f"/api/projects/planner-project/workitems/{workitem.json()['id']}/plan", json={"project_id": "planner-project"})
 
     assert planned.status_code == 200
@@ -263,18 +355,24 @@ prompt_template_root: {template_root}
     assert payload["task"]["status"] == "ready"
     assert payload["task"]["profile"] == "designer"
     assert payload["task"]["prompt_template_ref"] == "designer/workitem-plan"
+    assert payload["task"]["created_reason"] == "workflow-template:software-project-dev:stage:workitem-plan"
+    review_task = next(task for task in payload["tasks"] if task["created_reason"] == "workflow-template:software-project-dev:stage:workitem-plan-review")
+    assert review_task["status"] == "pending"
+    assert review_task["profile"] == "reviewer"
+    assert review_task["prompt_template_ref"] == "reviewer/planning-review"
 
     planned_again = client.post(f"/api/projects/planner-project/workitems/{workitem.json()['id']}/plan", json={"project_id": "planner-project"})
     assert planned_again.status_code == 200
-    assert len(planned_again.json()["tasks"]) == 1
+    assert len(planned_again.json()["tasks"]) == 2
 
     custom_workitem = client.post("/api/projects/planner-project/workitems", json={"project_id": "planner-project", "title": "Refine search", "risk_level": "low"})
     assert custom_workitem.status_code == 200
     custom_plan = client.post(
         f"/api/projects/planner-project/workitems/{custom_workitem.json()['id']}/plan",
-        json={"project_id": "planner-project", "prompt_template_ref": "designer/task-breakdown"},
+        json={"project_id": "planner-project", "parameters": {"designer_profile": "default"}, "prompt_template_ref": "designer/task-breakdown"},
     )
     assert custom_plan.status_code == 200
+    assert custom_plan.json()["task"]["profile"] == "default"
     assert custom_plan.json()["task"]["prompt_template_ref"] == "designer/task-breakdown"
 
 
@@ -283,7 +381,9 @@ def test_api_materializes_plan_output_into_breakdown_task(tmp_path: Path, monkey
     workspace_root.mkdir()
     template_root = tmp_path / "ptemplate"
     (template_root / "designer").mkdir(parents=True)
+    (template_root / "reviewer").mkdir(parents=True)
     (template_root / "designer" / "task-breakdown.md").write_text("Break down this plan.", encoding="utf-8")
+    (template_root / "reviewer" / "planning-review.md").write_text("Review this plan.", encoding="utf-8")
     config_path = tmp_path / "hwe.config.yaml"
     config_path.write_text(
         f"""
@@ -299,7 +399,7 @@ prompt_template_root: {template_root}
     project = storage.upsert_project("materialize-project", project_id="materialize-project")
     workitem = storage.create_workitem(project["id"], "Build todo")
     workflow = storage.create_workflow(project["id"], workitem["id"])
-    task = storage.create_task(workflow["id"], "Plan workitem", kind="planning", profile="designer")
+    task = storage.create_task(workflow["id"], "Plan workitem", kind="planning", profile="designer", prompt_template_ref="designer/workitem-plan")
     storage.claim_next_task(workflow["id"], worker_id="test", profile="designer")
     run = storage.create_task_run(task["id"], profile="designer")
     run_dir = project_root / ".engine" / "runs" / run["id"]
@@ -317,11 +417,36 @@ prompt_template_root: {template_root}
     )
     storage.finish_task_run(run["id"], status="succeeded", exit_code=0, result={"profile": "designer"}, stdout_path=stdout_path)
     storage.complete_task(task["id"], status="succeeded", result={"run_id": run["id"]})
+    review_task = storage.create_task(
+        workflow["id"],
+        "Review plan",
+        kind="review",
+        profile="reviewer",
+        depends_on=[task["id"]],
+        prompt_template_ref="reviewer/planning-review",
+        created_reason="workflow-template:software-project-dev:stage:workitem-plan-review",
+    )
+    storage.claim_next_task(workflow["id"], worker_id="reviewer", profile="reviewer")
+    review_run = storage.create_task_run(review_task["id"], profile="reviewer")
+    review_run_dir = project_root / ".engine" / "runs" / review_run["id"]
+    review_run_dir.mkdir(parents=True)
+    review_stdout_path = review_run_dir / "stdout.log"
+    review_stdout_path.write_text("Plan is materializable. Reviewed stdout: " + str(stdout_path), encoding="utf-8")
+    storage.finish_task_run(review_run["id"], status="succeeded", exit_code=0, result={"profile": "reviewer"}, stdout_path=review_stdout_path)
+    storage.complete_task(review_task["id"], status="succeeded", result={"run_id": review_run["id"]})
 
     client = TestClient(app)
+    dashboard = client.get(f"/api/projects/materialize-project/workitems/{workitem['id']}/dashboard", params={"project_id": "materialize-project"})
+    assert dashboard.status_code == 200
+    review_task_payload = next(item for item in dashboard.json()["tasks"] if item["id"] == review_task["id"])
+    action = review_task_payload["workflow_actions"]["materialize_plan"]
+    assert action["workflow_template_id"] == "software-project-dev"
+    assert action["profile"] == "designer"
+    assert action["prompt_template_ref"] == "designer/task-breakdown"
+
     response = client.post(
-        f"/api/projects/materialize-project/tasks/{task['id']}/materialize-plan",
-        json={"project_id": "materialize-project", "prompt_template_ref": "designer/task-breakdown"},
+        f"/api/projects/materialize-project/tasks/{review_task['id']}/materialize-plan",
+        json={"project_id": "materialize-project"},
     )
 
     assert response.status_code == 200
@@ -334,9 +459,11 @@ prompt_template_root: {template_root}
     assert created["prompt_template_ref"] == "designer/task-breakdown"
     assert "读取已完成的 workitem plan/design 文件" in created["prompt_text"]
     assert f"Plan stdout 路径：{stdout_path}" in created["prompt_text"]
+    assert f"Review stdout 路径：{review_stdout_path}" in created["prompt_text"]
+    assert "qa-review" in created["prompt_text"]
     assert "Read the completed workitem plan file" not in created["prompt_text"]
 
-    repeated = client.post(f"/api/projects/materialize-project/tasks/{task['id']}/materialize-plan", json={"project_id": "materialize-project"})
+    repeated = client.post(f"/api/projects/materialize-project/tasks/{review_task['id']}/materialize-plan", json={"project_id": "materialize-project"})
     assert repeated.status_code == 200
     assert repeated.json()["created"] == []
     assert repeated.json()["skipped"][0]["id"] == created["id"]
@@ -543,8 +670,9 @@ def test_api_task_retry_release_and_human_action_resolution(tmp_path: Path, monk
     assert answered.json()["status"] == "answered"
     assert storage.get_task(task["id"])["status"] == "ready"
 
-    claimed = storage.claim_next_task(workflow["id"], worker_id="test-2", profile="reviewer")
-    assert claimed is not None
+    running = storage.claim_next_task(workflow["id"], worker_id="test-2", profile="reviewer")
+    assert running is not None
+    assert running["status"] == "running"
     released = client.post(f"/api/projects/beta/tasks/{task['id']}/release", json={"reason": "test-release"})
     assert released.status_code == 200
     assert released.json()["status"] == "ready"

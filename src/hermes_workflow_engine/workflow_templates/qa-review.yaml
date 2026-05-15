@@ -1,0 +1,64 @@
+id: qa-review
+name: QA Review
+description: Nested workflow for verification, regression review, runtime smoke, and acceptance evidence.
+version: 1
+parameters:
+  reviewer_profile:
+    default: reviewer
+  qa_prompt_template:
+    default: qa/regression-review
+  smoke_prompt_template:
+    default: reviewer/runtime-smoke
+  planning_review_prompt_template:
+    default: reviewer/planning-review
+profiles:
+  reviewer: ${reviewer_profile}
+prompt_templates:
+  regression_review: ${qa_prompt_template}
+  runtime_smoke: ${smoke_prompt_template}
+  planning_review: ${planning_review_prompt_template}
+planning_task:
+  stage: qa-plan
+  title: 规划 QA 验证
+  kind: qa
+  profile: ${reviewer_profile}
+  prompt_template_ref: ${qa_prompt_template}
+  prompt_text: 规划这个交付物的 QA、回归检查、runtime smoke 和验收证据。
+  skills: [hwe]
+  outputs: [QA 验证计划]
+  gates: [覆盖风险路径, 包含确定性检查, 说明验收证据]
+review_tasks:
+  - stage: qa-plan-review
+    title: Review QA plan before task breakdown
+    kind: review
+    profile: ${reviewer_profile}
+    prompt_template_ref: ${planning_review_prompt_template}
+    prompt_text: Review the upstream QA plan before task breakdown. Verify risk coverage, deterministic checks, runtime smoke strategy, and acceptance evidence. If the plan is not materializable, fail with concrete blocking findings.
+    outputs: [QA plan review findings]
+    gates: [QA plan is materializable, deterministic verification is represented]
+    skills: [hwe]
+    priority_offset: 1
+materialize:
+  sources:
+    - stage: qa-plan-review
+      prompt_template_ref: ${planning_review_prompt_template}
+      statuses: [succeeded]
+  task:
+    stage: qa-breakdown
+    title: 将 QA plan 物化为验证任务
+    kind: qa
+    profile: ${reviewer_profile}
+    prompt_template_ref: ${qa_prompt_template}
+    outputs: [已创建 QA 任务图]
+    gates: [任务覆盖 QA 计划, 包含 runtime smoke 或替代证据]
+    skills: [hwe]
+    priority_offset: 1
+  input_prompt: |
+    读取 QA plan 文件并创建可执行的验证、回归、runtime smoke 和验收任务。
+
+    项目根目录：${project_root}
+    Workflow id：${workflow_id}
+    QA plan stdout 路径：${stdout_path}
+    QA plan review stdout 路径：${review_stdout_path}
+
+    不要猜测缺失验收标准；信息不足时请求 human action。

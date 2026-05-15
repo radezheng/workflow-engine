@@ -16,6 +16,7 @@ class ConfigError(ValueError):
 class HWEConfig:
     default_workspace_root: Path | None = None
     prompt_template_root: Path | None = None
+    workflow_template_root: Path | None = None
     project_database: dict[str, Any] | None = None
     profiles: dict[str, Any] | None = None
     ai_providers: dict[str, Any] | None = None
@@ -49,7 +50,7 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
     if not config_path.exists():
         if path or os.environ.get("HWE_CONFIG"):
             raise ConfigError(f"HWE config does not exist: {config_path}")
-        return HWEConfig(prompt_template_root=(config_path.parent / "ptemplate").resolve(), profiles={}, source_path=config_path, raw={})
+        return HWEConfig(prompt_template_root=(config_path.parent / "ptemplate").resolve(), workflow_template_root=(config_path.parent / "workflow_templates").resolve(), profiles={}, source_path=config_path, raw={})
 
     with config_path.open("r", encoding="utf-8") as file:
         raw = yaml.safe_load(file) or {}
@@ -67,6 +68,11 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
     if not isinstance(prompt_template_value, str) or not prompt_template_value.strip():
         raise ConfigError("`prompt_template_root` must be a non-empty string.")
     prompt_template_root = _resolve_config_path(config_path, prompt_template_value)
+
+    workflow_template_value = raw.get("workflow_template_root", "./workflow_templates")
+    if not isinstance(workflow_template_value, str) or not workflow_template_value.strip():
+        raise ConfigError("`workflow_template_root` must be a non-empty string.")
+    workflow_template_root = _resolve_config_path(config_path, workflow_template_value)
 
     project_database = raw.get("project_database", {})
     if project_database is None:
@@ -119,7 +125,7 @@ def load_config(path: str | Path | None = None) -> HWEConfig:
             if not isinstance(value, str) or not value.strip():
                 raise ConfigError(f"AI provider `{provider_name}` requires non-empty `{required_key}`.")
 
-    return HWEConfig(default_workspace_root=default_workspace_root, prompt_template_root=prompt_template_root, project_database=project_database, profiles=profiles, ai_providers=ai_providers, source_path=config_path, raw=raw)
+    return HWEConfig(default_workspace_root=default_workspace_root, prompt_template_root=prompt_template_root, workflow_template_root=workflow_template_root, project_database=project_database, profiles=profiles, ai_providers=ai_providers, source_path=config_path, raw=raw)
 
 
 def write_config(config: HWEConfig, path: str | Path | None = None, *, force: bool = False) -> Path:
@@ -132,6 +138,8 @@ def write_config(config: HWEConfig, path: str | Path | None = None, *, force: bo
         raw["default_workspace_root"] = str(config.default_workspace_root.expanduser())
     if config.prompt_template_root is not None:
         raw["prompt_template_root"] = str(config.prompt_template_root.expanduser())
+    if config.workflow_template_root is not None:
+        raw["workflow_template_root"] = str(config.workflow_template_root.expanduser())
     if config.project_database:
         raw["project_database"] = config.project_database
     if config.profiles:

@@ -90,8 +90,8 @@ class ProjectRuntime:
         if task["project_id"] != project_id:
             raise ProjectStorageError("Task does not belong to project.")
         self.storage.event(project_id, task["workitem_id"], task["workflow_id"], task_id, "task_run_requested", {"worker_id": worker_id, "profile": profile})
-        claimed = self.storage.claim_task(task_id, worker_id=worker_id, profile=profile)
-        status = self.run_task(claimed)
+        running_task = self.storage.claim_task(task_id, worker_id=worker_id, profile=profile)
+        status = self.run_task(running_task)
         tasks = self.storage.list_tasks(task["workflow_id"])
         failed = [item["id"] for item in tasks if item["status"] in {"failed", "cancelled"}]
         blocked = [item["id"] for item in tasks if item["status"] == "pending"]
@@ -177,6 +177,8 @@ class ProjectRuntime:
             stderr_path.write_text("", encoding="utf-8")
             return "succeeded", 0, {"dry_run": True, "command": command}
 
+        header = _command_log_header(kind="command", cwd=self.storage.project_root, command=command)
+
         completed = subprocess.run(
             command,
             cwd=self.storage.project_root,
@@ -186,8 +188,8 @@ class ProjectRuntime:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        stdout_path.write_text(completed.stdout, encoding="utf-8")
-        stderr_path.write_text(completed.stderr, encoding="utf-8")
+        stdout_path.write_text(f"{header}{completed.stdout}{_exit_code_log(completed.returncode)}", encoding="utf-8")
+        stderr_path.write_text(f"{header}{completed.stderr}{_exit_code_log(completed.returncode)}", encoding="utf-8")
         status = "succeeded" if completed.returncode == 0 else "failed"
         return status, completed.returncode, {"command": command}
 
@@ -205,7 +207,7 @@ class ProjectRuntime:
             return "succeeded", 0, {"dry_run": True, "checks": len(spec)}
 
         results: list[dict[str, Any]] = []
-        stdout_lines: list[str] = []
+        stdout_lines: list[str] = [_command_log_header(kind="http_check", cwd=self.storage.project_root, command=_http_check_command_for_log(spec)).rstrip()]
         stderr_lines: list[str] = []
         for index, check in enumerate(spec, start=1):
             ok, result, detail = self._run_single_http_check(check)
@@ -216,10 +218,12 @@ class ProjectRuntime:
             if not ok:
                 stderr_lines.append(result["error"])
 
-        stdout_path.write_text("\n".join(stdout_lines) + ("\n" if stdout_lines else ""), encoding="utf-8")
-        stderr_path.write_text("\n".join(stderr_lines) + ("\n" if stderr_lines else ""), encoding="utf-8")
         status = "succeeded" if not stderr_lines else "failed"
-        return status, 0 if status == "succeeded" else 1, {"checks": results}
+        exit_code = 0 if status == "succeeded" else 1
+        stdout_path.write_text("\n".join(stdout_lines) + f"\n{_exit_code_log(exit_code)}", encoding="utf-8")
+        stderr_prefix = _command_log_header(kind="http_check", cwd=self.storage.project_root, command=_http_check_command_for_log(spec))
+        stderr_path.write_text(stderr_prefix + "\n".join(stderr_lines) + _exit_code_log(exit_code), encoding="utf-8")
+        return status, exit_code, {"checks": results}
 
     def _http_check_spec(self, task: dict[str, Any]) -> list[dict[str, Any]]:
         raw = (task.get("prompt_text") or "").strip()
@@ -318,6 +322,16 @@ class ProjectRuntime:
 
         timed_out = False
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+            header = _command_log_header(
+                kind="agent",
+                cwd=self.storage.project_root,
+                command=_command_for_log(command, stdout_path.parent / "prompt.md"),
+                profile=profile_name,
+            )
+            stdout.write(header)
+            stderr.write(header)
+            stdout.flush()
+            stderr.flush()
             try:
                 self._run_switch_command(profile_config, stdout, stderr)
                 self._healthcheck(profile_config, stderr=stderr)
@@ -341,6 +355,8 @@ class ProjectRuntime:
                 timed_out = True
                 stderr.write(f"Hermes command timed out after {profile_config.get('timeout_seconds', 3600)} seconds.\n")
                 stderr.flush()
+            stderr.write(_exit_code_log(return_code))
+            stderr.flush()
 
         if timed_out and _stdout_has_clarify_timeout(stdout_path):
             clarification_path = _write_clarification_file(
@@ -389,10 +405,17 @@ class ProjectRuntime:
             "# HWE 项目任务",
             "",
             f"项目根目录：{self.storage.project_root}",
+            f"Project ID：{task['project_id']}",
+            f"Workitem ID：{task['workitem_id']}",
+            f"Workflow ID：{task['workflow_id']}",
+            f"Task ID：{task['id']}",
             f"Workitem：{workitem['title']}",
             f"任务：{task['title']}",
             f"任务类型：{task['kind']}",
             f"风险等级：{task['risk_level']}",
+            "",
+            "## HWE 控制面",
+            *self._hwe_control_context_lines(),
             "",
             "## 需求",
             workitem.get("requirements_md") or "（无）",
@@ -413,6 +436,26 @@ class ProjectRuntime:
         ]
         parts.append("\n".join(metadata))
         return "\n\n".join(part for part in parts if part.strip())
+
+    def _hwe_control_context_lines(self) -> list[str]:
+        repo_root = Path(__file__).resolve().parents[2]
+        hwe_cli = repo_root / ".venv" / "bin" / "hwe"
+        hwe_command = str(hwe_cli) if hwe_cli.exists() else shutil.which("hwe") or "hwe"
+        config_path = self.config.source_path or Path(os.environ.get("HWE_CONFIG", repo_root / "hwe.config.yaml"))
+        profiles = sorted((self.config.profiles or {}).keys())
+        profile_text = ", ".join(profiles) if profiles else "（未配置 profiles；创建 agent task 前必须先检查 HWE config）"
+        project_ref = self.storage.project_root.name
+        return [
+            f"- HWE repo：{repo_root}",
+            f"- HWE config：{config_path}",
+            f"- HWE CLI：{hwe_command}",
+            f"- 可用 HWE profiles：{profile_text}",
+            "- 运行 HWE 控制命令时使用仓库根目录和显式 config，例如：",
+            f"  `cd {shlex.quote(str(repo_root))} && HWE_CONFIG={shlex.quote(str(config_path))} {shlex.quote(hwe_command)} task list {shlex.quote(project_ref)} <workflow-id>`",
+            "- 创建任务只能分配给上面列出的真实 profile；不要使用未配置的 researcher/architect/developer/analyst 等虚构 profile。",
+            "- 需要用户输入时，使用 `hwe human-action create` 创建真正的 HWE human action；不要用 `hwe task create --kind human-action` 伪造人工任务。",
+            "- 创建后续任务时使用 `hwe task create <project> <workflow-id> <title> --kind ... --profile ... --depends-on ... --prompt-template-ref ...`，并用真实 task id 作为依赖。",
+        ]
 
     def _prompt_template_body(self, template_ref: str) -> str:
         safe_ref = template_ref.strip().removesuffix(".md")
@@ -443,7 +486,8 @@ class ProjectRuntime:
             extra_args = shlex.split(extra_args)
         elif not isinstance(extra_args, list):
             extra_args = []
-        return [*base_command, "chat", "-Q", "--source", "workflow-engine", *[str(arg) for arg in extra_args], "-q", prompt_text]
+        profile_args = _hermes_profile_args(base_command, hermes_profile, extra_args)
+        return [*base_command, "chat", *profile_args, "-Q", "--source", "workflow-engine", *[str(arg) for arg in extra_args], "-q", prompt_text]
 
     def _run_switch_command(self, profile_config: dict[str, Any], stdout: Any, stderr: Any) -> None:
         switch_commands = _switch_commands(profile_config)
@@ -558,6 +602,45 @@ def _switch_commands(profile_config: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         raise RuntimeError(f"Profile switch_commands step {index} must be a string or mapping")
     return commands
+
+
+def _hermes_profile_args(base_command: list[str], hermes_profile: str, extra_args: list[Any]) -> list[str]:
+    if not hermes_profile:
+        return []
+    combined_args = [str(arg) for arg in [*base_command[1:], *extra_args]]
+    if "-p" in combined_args or "--profile" in combined_args or any(arg.startswith("--profile=") for arg in combined_args):
+        return []
+    if base_command and Path(base_command[0]).name == hermes_profile:
+        return []
+    return ["-p", hermes_profile]
+
+
+def _command_log_header(*, kind: str, cwd: Path, command: str, profile: str | None = None) -> str:
+    lines = ["# HWE run", f"kind: {kind}", f"cwd: {cwd}"]
+    if profile:
+        lines.append(f"profile: {profile}")
+    lines.append(f"$ {command}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _command_for_log(command: list[str], prompt_path: Path) -> str:
+    visible = list(command)
+    for index, part in enumerate(visible[:-1]):
+        if part == "-q":
+            visible[index + 1] = str(prompt_path)
+            break
+    return " ".join(shlex.quote(part) for part in visible)
+
+
+def _http_check_command_for_log(spec: list[dict[str, Any]]) -> str:
+    if len(spec) == 1:
+        check = spec[0]
+        return f"http_check {str(check.get('method', 'GET')).upper()} {check.get('url')}"
+    return f"http_check {len(spec)} requests"
+
+
+def _exit_code_log(exit_code: int | None) -> str:
+    return f"\n# HWE exit_code: {exit_code}\n"
 
 
 def _stdout_has_clarify_timeout(stdout_path: Path) -> bool:

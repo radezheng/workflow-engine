@@ -6,6 +6,7 @@ import re
 import sqlite3
 import subprocess
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ class ProjectStorageError(ValueError):
 TASK_DONE_STATUSES = {"succeeded", "skipped", "superseded"}
 TASK_TERMINAL_STATUSES = {*TASK_DONE_STATUSES, "failed", "cancelled"}
 PROJECT_STATUSES = {"active", "archived"}
+WORKITEM_ARCHIVED_STATUS = "archived"
 _POSTGRES_POOLS: dict[tuple[Any, ...], Any] = {}
 _POSTGRES_POOLS_LOCK = threading.Lock()
 
@@ -72,14 +74,16 @@ def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True)
 
 
-def _workitem_status_from_task_statuses(statuses: list[str]) -> str:
+def _workitem_status_from_task_statuses(statuses: list[str], *, has_pending_human_action: bool = False) -> str:
+    if has_pending_human_action:
+        return "waiting_for_human"
     if not statuses:
         return "planning"
     if any(status in {"waiting_for_info", "waiting_for_approval"} for status in statuses):
         return "waiting_for_human"
     if any(status in {"failed", "cancelled"} for status in statuses):
         return "blocked"
-    if any(status in {"ready", "claimed"} for status in statuses):
+    if any(status in {"ready", "running"} for status in statuses):
         return "in_progress"
     if any(status == "pending" for status in statuses):
         return "blocked"
@@ -245,15 +249,39 @@ class ProjectStorage:
             raise ProjectStorageError(f"Unknown workitem: {workitem_id}")
         return dict(row)
 
-    def list_workitems(self, project_id: str) -> list[dict[str, Any]]:
+    def list_workitems(self, project_id: str, *, include_archived: bool = False) -> list[dict[str, Any]]:
         self.get_project(project_id)
         self.sync_workitem_statuses(project_id)
+        query = "SELECT * FROM workitems WHERE project_id=?"
+        params: list[Any] = [project_id]
+        if not include_archived:
+            query += " AND status != ?"
+            params.append(WORKITEM_ARCHIVED_STATUS)
+        query += " ORDER BY created_at DESC, priority, title"
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM workitems WHERE project_id=? ORDER BY created_at DESC, priority, title",
-                (project_id,),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def archive_workitem(self, workitem_id: str) -> dict[str, Any]:
+        workitem = self.get_workitem(workitem_id)
+        if workitem["status"] == WORKITEM_ARCHIVED_STATUS:
+            return workitem
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute("UPDATE workitems SET status=?, updated_at=? WHERE id=?", (WORKITEM_ARCHIVED_STATUS, timestamp, workitem_id))
+        self.event(workitem["project_id"], workitem_id, workitem.get("current_workflow_id"), None, "workitem_archived", {"previous_status": workitem["status"], "status": WORKITEM_ARCHIVED_STATUS})
+        return self.get_workitem(workitem_id)
+
+    def restore_workitem(self, workitem_id: str) -> dict[str, Any]:
+        workitem = self.get_workitem(workitem_id)
+        if workitem["status"] != WORKITEM_ARCHIVED_STATUS:
+            return workitem
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute("UPDATE workitems SET status='ready', updated_at=? WHERE id=?", (timestamp, workitem_id))
+        restored = self.sync_workitem_status(workitem_id)
+        self.event(restored["project_id"], workitem_id, restored.get("current_workflow_id"), None, "workitem_restored", {"previous_status": WORKITEM_ARCHIVED_STATUS, "status": restored["status"]})
+        return restored
 
     def sync_workitem_statuses(self, project_id: str) -> None:
         with self.connect() as connection:
@@ -263,14 +291,26 @@ class ProjectStorage:
 
     def sync_workitem_status(self, workitem_id: str) -> dict[str, Any]:
         workitem = self.get_workitem(workitem_id)
+        if workitem["status"] == WORKITEM_ARCHIVED_STATUS:
+            return workitem
         workflow_id = workitem.get("current_workflow_id")
         if not workflow_id:
             return workitem
         self.mark_ready_tasks(workflow_id)
         with self.connect() as connection:
             tasks = connection.execute("SELECT status FROM tasks WHERE workflow_id=?", (workflow_id,)).fetchall()
+            pending_human_action = connection.execute(
+                """
+                SELECT 1
+                FROM human_actions
+                WHERE status='pending'
+                  AND (workitem_id=? OR workflow_id=?)
+                LIMIT 1
+                """,
+                (workitem_id, workflow_id),
+            ).fetchone()
         statuses = [row["status"] for row in tasks]
-        next_status = _workitem_status_from_task_statuses(statuses)
+        next_status = _workitem_status_from_task_statuses(statuses, has_pending_human_action=pending_human_action is not None)
         if workitem["status"] == next_status:
             return workitem
         timestamp = now_iso()
@@ -282,6 +322,8 @@ class ProjectStorage:
         workitem = self.get_workitem(workitem_id)
         if workitem["project_id"] != project_id:
             raise ProjectStorageError("Workitem does not belong to project.")
+        if workitem["status"] == WORKITEM_ARCHIVED_STATUS:
+            raise ProjectStorageError("Archived workitems must be restored before creating workflows.")
         timestamp = now_iso()
         workflow_id = _id("wf")
         with self.connect() as connection:
@@ -346,6 +388,8 @@ class ProjectStorage:
         created_by: str | None = None,
         created_reason: str | None = None,
     ) -> dict[str, Any]:
+        if kind in {"human-action", "human_action"}:
+            raise ProjectStorageError("Human input must be represented with `hwe human-action create` or a task completed as waiting_for_info/waiting_for_approval, not a fake task kind.")
         workflow = self.get_workflow(workflow_id)
         timestamp = now_iso()
         task_id = _id("task")
@@ -408,6 +452,7 @@ class ProjectStorage:
         return self._decode_task(dict(row))
 
     def list_tasks(self, workflow_id: str, *, update_readiness: bool = True) -> list[dict[str, Any]]:
+        self.initialize()
         if update_readiness:
             self.mark_ready_tasks(workflow_id)
         with self.connect() as connection:
@@ -416,6 +461,20 @@ class ProjectStorage:
                 (workflow_id,),
             ).fetchall()
         return [self._decode_task(dict(row)) for row in rows]
+
+    def list_task_dependencies(self, task_id: str) -> list[str]:
+        task = self.get_task(task_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT depends_on_task_id
+                FROM task_dependencies
+                WHERE task_id=?
+                ORDER BY created_at, depends_on_task_id
+                """,
+                (task["id"],),
+            ).fetchall()
+        return [row["depends_on_task_id"] for row in rows]
 
     def update_task_definition(
         self,
@@ -501,14 +560,14 @@ class ProjectStorage:
                 (claim_id, task["id"], worker_id, profile, timestamp, expires_at),
             )
             connection.execute(
-                "UPDATE tasks SET status='claimed', attempt=attempt+1, updated_at=? WHERE id=?",
+                "UPDATE tasks SET status='running', attempt=attempt+1, updated_at=? WHERE id=?",
                 (timestamp, task["id"]),
             )
-        claimed = self.get_task(task["id"])
-        claimed["claim_id"] = claim_id
-        self.event(claimed["project_id"], claimed["workitem_id"], workflow_id, claimed["id"], "task_claimed", {"worker_id": worker_id, "claim_id": claim_id})
-        self.sync_workitem_status(claimed["workitem_id"])
-        return claimed
+        running = self.get_task(task["id"])
+        running["claim_id"] = claim_id
+        self.event(running["project_id"], running["workitem_id"], workflow_id, running["id"], "task_running", {"worker_id": worker_id, "claim_id": claim_id})
+        self.sync_workitem_status(running["workitem_id"])
+        return running
 
     def claim_task(self, task_id: str, *, worker_id: str, profile: str | None = None, lease_seconds: int = 900) -> dict[str, Any]:
         task = self.get_task(task_id)
@@ -530,21 +589,28 @@ class ProjectStorage:
                 (claim_id, task_id, worker_id, profile, timestamp, expires_at),
             )
             connection.execute(
-                "UPDATE tasks SET status='claimed', attempt=attempt+1, updated_at=? WHERE id=?",
+                "UPDATE tasks SET status='running', attempt=attempt+1, updated_at=? WHERE id=?",
                 (timestamp, task_id),
             )
-        claimed = self.get_task(task_id)
-        claimed["claim_id"] = claim_id
-        self.event(claimed["project_id"], claimed["workitem_id"], claimed["workflow_id"], claimed["id"], "task_claimed", {"worker_id": worker_id, "claim_id": claim_id})
-        self.sync_workitem_status(claimed["workitem_id"])
-        return claimed
+        running = self.get_task(task_id)
+        running["claim_id"] = claim_id
+        self.event(running["project_id"], running["workitem_id"], running["workflow_id"], running["id"], "task_running", {"worker_id": worker_id, "claim_id": claim_id})
+        self.sync_workitem_status(running["workitem_id"])
+        return running
 
     def release_task_claim(self, task_id: str, *, reason: str = "released") -> dict[str, Any]:
         task = self.get_task(task_id)
-        if task["status"] != "claimed":
-            raise ProjectStorageError(f"Task is not claimed: {task_id}")
+        if task["status"] != "running":
+            raise ProjectStorageError(f"Task is not running: {task_id}")
         timestamp = now_iso()
+        open_run_ids: list[str] = []
         with self.connect() as connection:
+            open_run_ids = [row["id"] for row in connection.execute("SELECT id FROM task_runs WHERE task_id=? AND status='started'", (task_id,)).fetchall()]
+            for run_id in open_run_ids:
+                connection.execute(
+                    "UPDATE task_runs SET status='cancelled', ended_at=?, result_json=? WHERE id=?",
+                    (timestamp, _json({"reason": reason, "released": True}), run_id),
+                )
             connection.execute(
                 "UPDATE worker_claims SET status='released', released_at=?, release_reason=? WHERE task_id=? AND status='claimed'",
                 (timestamp, reason, task_id),
@@ -553,7 +619,9 @@ class ProjectStorage:
                 "UPDATE tasks SET status='ready', ready_at=?, updated_at=? WHERE id=?",
                 (timestamp, timestamp, task_id),
             )
-        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_claim_released", {"reason": reason})
+        for run_id in open_run_ids:
+            self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_run_finished", {"run_id": run_id, "status": "cancelled", "exit_code": None}, run_id=run_id)
+        self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_run_released", {"reason": reason})
         self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_ready", {"reason": reason})
         self.sync_workitem_status(task["workitem_id"])
         return self.get_task(task_id)
@@ -853,6 +921,8 @@ class ProjectStorage:
             run_id=run_id,
             human_action_id=action_id,
         )
+        if workitem_id:
+            self.sync_workitem_status(workitem_id)
         return self.get_human_action(action_id)
 
     def get_human_action(self, action_id: str) -> dict[str, Any]:
@@ -1006,7 +1076,7 @@ class _PostgresConnection:
         self._real_dict_cursor = RealDictCursor
         self.schema = _postgres_identifier(config.get("schema", "hwe"))
         self._pool = _postgres_pool(config)
-        self._connection = self._pool.getconn()
+        self._connection = _postgres_pool_getconn(self._pool)
         try:
             with self._connection.cursor() as cursor:
                 cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
@@ -1081,6 +1151,23 @@ def _postgres_pool(config: dict[str, Any]) -> Any:
             pool = ThreadedConnectionPool(1, _postgres_maxconn(config), **_postgres_connect_kwargs(config))
             _POSTGRES_POOLS[key] = pool
         return pool
+
+
+def _postgres_pool_getconn(pool: Any) -> Any:
+    try:
+        from psycopg2.pool import PoolError
+    except ImportError as exc:
+        raise ProjectStorageError("Postgres project storage requires psycopg2. Install `psycopg2-binary`.") from exc
+    deadline = time.monotonic() + 10.0
+    delay = 0.02
+    while True:
+        try:
+            return pool.getconn()
+        except PoolError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 1.5, 0.25)
 
 
 def _postgres_pool_key(config: dict[str, Any]) -> tuple[Any, ...]:

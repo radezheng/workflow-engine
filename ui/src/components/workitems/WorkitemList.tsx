@@ -1,99 +1,97 @@
 import { useState } from 'react';
-import { ClipboardList, FileText } from 'lucide-react';
-import type { PromptTemplate, Workitem } from '../../api';
-import { PromptTemplatePicker } from '../prompt-templates/PromptTemplatePicker';
+import { Archive, ClipboardList, Ellipsis, RotateCcw } from 'lucide-react';
+import type { Workitem, WorkflowTemplate } from '../../api';
 
 type WorkitemListProps = {
   workitems: Workitem[];
   selectedWorkitem: Workitem | null;
-  plannerTemplates: PromptTemplate[];
+  workflowTemplates: WorkflowTemplate[];
   disabled: boolean;
+  showArchived: boolean;
   onSelectWorkitem: (workitem: Workitem) => void;
-  onPlanWorkitem: (workitem: Workitem, promptTemplateRef: string) => void;
-  onSavePromptToProject: (input: { role: string; name: string; body: string }) => Promise<PromptTemplate | void>;
-  onSavePromptToPublic: (input: { role: string; name: string; body: string }) => Promise<PromptTemplate | void>;
-  onDeletePrompt: (template: PromptTemplate) => Promise<void>;
+  onPlanWorkitem: (workitem: Workitem, workflowTemplateId: string, parameters: Record<string, string>) => void;
+  onArchiveWorkitem: (workitem: Workitem) => void;
+  onRestoreWorkitem: (workitem: Workitem) => void;
+  onShowArchivedChange: (showArchived: boolean) => void;
 };
 
-export function WorkitemList({ workitems, selectedWorkitem, plannerTemplates, disabled, onSelectWorkitem, onPlanWorkitem, onSavePromptToProject, onSavePromptToPublic, onDeletePrompt }: WorkitemListProps) {
-  const [planPromptsByWorkitem, setPlanPromptsByWorkitem] = useState<Record<string, string>>({});
-  const [pickerWorkitem, setPickerWorkitem] = useState<Workitem | null>(null);
+export function WorkitemList({ workitems, selectedWorkitem, workflowTemplates, disabled, showArchived, onSelectWorkitem, onPlanWorkitem, onArchiveWorkitem, onRestoreWorkitem, onShowArchivedChange }: WorkitemListProps) {
+  const [templatesByWorkitem, setTemplatesByWorkitem] = useState<Record<string, string>>({});
+  const [openWorkitemId, setOpenWorkitemId] = useState<string | null>(null);
   if (!workitems.length) {
-    return <p className="empty-state">No workitems</p>;
+    return <><label className="toggle-row compact"><input type="checkbox" checked={showArchived} onChange={(event) => onShowArchivedChange(event.target.checked)} />Show archived</label><p className="empty-state">No workitems</p></>;
   }
-  const fallbackTemplate: PromptTemplate = {
-    id: 'default:planner/workitem-plan',
-    source: 'public',
-    role: 'planner',
-    name: 'workitem-plan',
-    version: 'file',
-    description: '',
-    body_md: '',
-    tags: [],
-    path: '',
-    updated_at: 0,
-  };
-  const templateOptions = plannerTemplates.length ? plannerTemplates : [fallbackTemplate];
+  const templateOptions = workflowTemplates.length ? workflowTemplates : [{ id: 'software-project-dev', name: 'Software Project Development', resolved_parameters: {} } as WorkflowTemplate];
   const orderedWorkitems = [...workitems].sort(compareWorkitemsByNewestFirst);
   return (
     <div className="workitem-list">
-      {orderedWorkitems.map((item, index) => (
-        <article key={item.id} className={item.id === selectedWorkitem?.id ? 'workitem selected' : 'workitem'}>
-          <button type="button" className="workitem-main" onClick={() => onSelectWorkitem(item)} title="Open workitem">
-            <span className="workitem-title-row">
-              <span className="workitem-number">{index + 1}</span>
-              <span>{item.title}</span>
-            </span>
-            <small>{item.status} · p{item.priority} · {item.risk_level}</small>
-          </button>
-          <div className="workitem-plan-actions">
-            <button
-              type="button"
-              className="secondary-button prompt-ref-button"
-              disabled={disabled}
-              onClick={(event) => {
-                event.stopPropagation();
-                setPickerWorkitem(item);
-              }}
-              title="Choose plan prompt"
-            >
-              <FileText size={15} />
-              {planPromptsByWorkitem[item.id] ?? 'planner/workitem-plan'}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={disabled}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPlanWorkitem(item, planPromptsByWorkitem[item.id] ?? 'planner/workitem-plan');
-              }}
-              title="Create workflow and planner task"
-            >
-              <ClipboardList size={15} />
-              Plan
-            </button>
-          </div>
-        </article>
-      ))}
-      {pickerWorkitem && (
-        <PromptTemplatePicker
-          open={Boolean(pickerWorkitem)}
-          title="Choose Plan Prompt"
-          templates={templateOptions}
-          roleFilter="planner"
-          selectedRef={planPromptsByWorkitem[pickerWorkitem.id] ?? 'planner/workitem-plan'}
-          disabled={disabled}
-          onClose={() => setPickerWorkitem(null)}
-          onSelect={(promptTemplateRef) => {
-            setPlanPromptsByWorkitem((current) => ({ ...current, [pickerWorkitem.id]: promptTemplateRef }));
-            setPickerWorkitem(null);
-          }}
-          onSaveProject={onSavePromptToProject}
-          onSavePublic={onSavePromptToPublic}
-          onDelete={onDeletePrompt}
-        />
-      )}
+      <label className="toggle-row compact"><input type="checkbox" checked={showArchived} onChange={(event) => onShowArchivedChange(event.target.checked)} />Show archived</label>
+      {orderedWorkitems.map((item, index) => {
+          const archived = item.status === 'archived';
+          const planDisabled = disabled || archived;
+          return (
+            <article key={item.id} className={item.id === selectedWorkitem?.id ? 'workitem selected' : 'workitem'}>
+              <div className="workitem-header-row">
+                <button type="button" className="workitem-main" onClick={() => onSelectWorkitem(item)} title="Open workitem">
+                  <span className="workitem-title-row">
+                    <span className="workitem-number">{index + 1}</span>
+                    <span>{item.title}</span>
+                  </span>
+                  <small>{item.status} · p{item.priority} · {item.risk_level}</small>
+                </button>
+                <div className="row-menu">
+                  <button type="button" className="icon-button" onClick={() => setOpenWorkitemId(openWorkitemId === item.id ? null : item.id)} title="Workitem actions" aria-label={`Actions for ${item.title}`}>
+                    <Ellipsis size={16} />
+                  </button>
+                  {openWorkitemId === item.id && (
+                    <div className="row-menu-popover" role="menu">
+                      {archived ? (
+                        <button type="button" role="menuitem" disabled={disabled} onClick={() => { setOpenWorkitemId(null); onRestoreWorkitem(item); }}>
+                          <RotateCcw size={14} />
+                          Restore
+                        </button>
+                      ) : (
+                        <button type="button" role="menuitem" disabled={disabled} onClick={() => { setOpenWorkitemId(null); onArchiveWorkitem(item); }}>
+                          <Archive size={14} />
+                          Archive
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="workitem-plan-actions">
+                <select
+                  className="prompt-ref-button"
+                  disabled={planDisabled}
+                  value={templatesByWorkitem[item.id] ?? templateOptions[0]?.id ?? 'software-project-dev'}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => setTemplatesByWorkitem((current) => ({ ...current, [item.id]: event.target.value }))}
+                  title="Choose workflow template"
+                >
+                  {templateOptions.map((template) => (
+                    <option key={template.id} value={template.id}>{template.name || template.id}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={planDisabled}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const workflowTemplateId = templatesByWorkitem[item.id] ?? templateOptions[0]?.id ?? 'software-project-dev';
+                    const template = templateOptions.find((option) => option.id === workflowTemplateId);
+                    onPlanWorkitem(item, workflowTemplateId, template?.resolved_parameters ?? {});
+                  }}
+                  title="Create workflow from template"
+                >
+                  <ClipboardList size={15} />
+                  Plan
+                </button>
+              </div>
+            </article>
+          );
+        })}
     </div>
   );
 }

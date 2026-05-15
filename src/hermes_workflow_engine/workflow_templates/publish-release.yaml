@@ -1,0 +1,61 @@
+id: publish-release
+name: Publish Release
+description: Nested workflow for authorized packaging, deployment, release notes, and post-publish verification.
+version: 1
+parameters:
+  reviewer_profile:
+    default: reviewer
+  publish_prompt_template:
+    default: operator/recovery-plan
+  planning_review_prompt_template:
+    default: reviewer/planning-review
+profiles:
+  reviewer: ${reviewer_profile}
+prompt_templates:
+  publish_plan: ${publish_prompt_template}
+  planning_review: ${planning_review_prompt_template}
+planning_task:
+  stage: publish-plan
+  title: 规划发布流程
+  kind: planning
+  profile: ${reviewer_profile}
+  prompt_template_ref: ${publish_prompt_template}
+  prompt_text: 在明确授权后规划发布、回滚、发布说明和发布后验证。
+  skills: [hwe]
+  outputs: [发布计划]
+  gates: [授权明确, 回滚路径明确, 发布后验证明确]
+review_tasks:
+  - stage: publish-plan-review
+    title: Review publish plan before task breakdown
+    kind: review
+    profile: ${reviewer_profile}
+    prompt_template_ref: ${planning_review_prompt_template}
+    prompt_text: Review the upstream publish plan before task breakdown. Verify authorization, target environment, rollback path, credential handling, and post-publish verification. If the plan is not materializable, fail with concrete blocking findings.
+    outputs: [publish plan review findings]
+    gates: [authorization and rollback are clear, publish tasks are materializable]
+    skills: [hwe]
+    priority_offset: 1
+materialize:
+  sources:
+    - stage: publish-plan-review
+      prompt_template_ref: ${planning_review_prompt_template}
+      statuses: [succeeded]
+  task:
+    stage: publish-breakdown
+    title: 将发布计划物化为任务
+    kind: planning
+    profile: ${reviewer_profile}
+    prompt_template_ref: ${publish_prompt_template}
+    outputs: [已创建发布任务图]
+    gates: [保留授权证据, 包含回滚和验证任务]
+    skills: [hwe]
+    priority_offset: 1
+  input_prompt: |
+    读取发布计划并创建发布、回滚准备、发布说明和发布后验证任务。
+
+    项目根目录：${project_root}
+    Workflow id：${workflow_id}
+    Publish plan stdout 路径：${stdout_path}
+    Publish plan review stdout 路径：${review_stdout_path}
+
+    如果缺少发布授权、凭据、目标环境或回滚策略，请请求 human action。

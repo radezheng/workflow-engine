@@ -66,6 +66,10 @@ def create_ai_assist_response(
     prompt_messages = _build_messages(config, target, messages, draft, context or {})
     content = _chat_completion(provider, prompt_messages)
     parsed = _parse_json_object(content)
+    if target == "human_action":
+        fallback = _human_action_refusal_fallback(parsed, content, messages, draft, context or {})
+        if fallback:
+            return fallback
     if not parsed:
         return {"message": content, "draft": draft, "ready": False, "raw": content}
     response_draft = parsed.get("draft")
@@ -200,3 +204,152 @@ def _parse_json_object(content: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _human_action_refusal_fallback(
+    parsed: dict[str, Any] | None,
+    raw_content: str,
+    messages: list[dict[str, str]],
+    draft: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any] | None:
+    assistant_message = raw_content
+    parsed_draft: dict[str, Any] = {}
+    if parsed:
+        assistant_message = str(parsed.get("message") or parsed.get("assistant_message") or raw_content)
+        candidate = parsed.get("draft")
+        if isinstance(candidate, dict):
+            parsed_draft = candidate
+        if parsed.get("ready") and _has_human_action_response(parsed_draft):
+            return None
+    if not _looks_like_human_action_deferral(assistant_message) and not _user_asked_for_contextual_answer(messages):
+        return None
+    fallback_draft = _build_human_action_contextual_draft(draft, context, messages)
+    if not fallback_draft:
+        return None
+    chinese = _prefers_chinese(messages, draft, context)
+    message = "我已按当前上下文草拟了一版，可应用后再改。" if chinese else "I drafted a response from the current context; you can apply it and adjust before submitting."
+    return {"message": message, "draft": {**draft, **parsed_draft, **fallback_draft}, "ready": True, "raw": raw_content}
+
+
+def _has_human_action_response(draft: dict[str, Any]) -> bool:
+    return any(isinstance(draft.get(field), str) and draft[field].strip() for field in ("text", "reason"))
+
+
+def _looks_like_human_action_deferral(message: str) -> bool:
+    lowered = message.lower()
+    refusal_markers = [
+        "cannot make",
+        "can't make",
+        "cannot decide",
+        "can't decide",
+        "on your behalf",
+        "project decisions",
+        "please let me know",
+        "i cannot",
+        "i can't",
+        "无法替你",
+        "不能替你",
+        "不能代表你",
+        "无法代表你",
+        "请告诉我",
+    ]
+    return any(marker in lowered for marker in refusal_markers)
+
+
+def _user_asked_for_contextual_answer(messages: list[dict[str, str]]) -> bool:
+    latest_user_messages = [message.get("content", "") for message in messages[-4:] if message.get("role") == "user"]
+    text = "\n".join(latest_user_messages).lower()
+    markers = [
+        "按你的理解",
+        "按当前上下文",
+        "帮我回答",
+        "直接回答",
+        "草拟答案",
+        "draft",
+        "answer for me",
+        "use your judgment",
+        "default suggestion",
+        "default suggestions",
+        "accept the default",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _build_human_action_contextual_draft(draft: dict[str, Any], context: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, str] | None:
+    mode = str(draft.get("response_mode") or "").strip()
+    field = "reason" if mode == "reject" else "text"
+    if isinstance(draft.get(field), str) and draft[field].strip():
+        return None
+    if field == "reason":
+        return None
+    action = context.get("human_action") if isinstance(context.get("human_action"), dict) else {}
+    action = action or {}
+    options = _string_list(action.get("options") or draft.get("options"))
+    questions = _question_list(action.get("questions") or draft.get("questions"))
+    body = str(action.get("body") or draft.get("body") or "").strip()
+    choice = _default_human_action_choice(options)
+    chinese = _prefers_chinese(messages, draft, context)
+    if chinese:
+        if choice:
+            answer = f"接受默认建议：{choice}。请按请求中描述的范围推进。"
+        else:
+            answer = "接受请求中描述的默认建议。请按当前 human action 的问题、约束和上下文推进；如果后续发现数据源或实现约束冲突，再创建新的 human action 确认调整。"
+        if questions:
+            answer += f" 需要确认的项按以下理解处理：{'；'.join(questions[:3])}。"
+        elif body:
+            answer += f" 依据：{_compact_one_line(body, 220)}"
+    else:
+        if choice:
+            answer = f"Accept the default suggestion: {choice}. Proceed within the scope described in the request."
+        else:
+            answer = "Accept the default proposal described in this human action. Proceed using the current questions, constraints, and context; if later source or implementation constraints conflict, raise a new human action for the adjustment."
+        if questions:
+            answer += f" Treat the open items as: {'; '.join(questions[:3])}."
+        elif body:
+            answer += f" Basis: {_compact_one_line(body, 220)}"
+    return {"text": answer}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _question_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, dict) and isinstance(item.get("question"), str) and item["question"].strip():
+            result.append(item["question"].strip())
+        elif isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _default_human_action_choice(options: list[str]) -> str | None:
+    if not options:
+        return None
+    for option in options:
+        lowered = option.lower()
+        if "default" in lowered or "suggest" in lowered or "accept" in lowered or "默认" in option or "接受" in option or "建议" in option:
+            return option
+    return None
+
+
+def _compact_one_line(value: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", value).strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."
+
+
+def _prefers_chinese(messages: list[dict[str, str]], draft: dict[str, Any], context: dict[str, Any]) -> bool:
+    corpus = json.dumps({"messages": messages[-4:], "draft": draft, "context": context}, ensure_ascii=False)
+    return bool(re.search(r"[\u4e00-\u9fff]", corpus))

@@ -6,7 +6,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .vscode/settings.json
-hwe.config.yaml
+hwe.config.yaml*
 node_modules/
 ui/dist/
 ui/node_modules/

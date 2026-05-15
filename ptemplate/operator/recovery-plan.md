@@ -6,7 +6,7 @@ Inspect the current project workflow state and decide which tasks should be rele
 
 Consider:
 
-- Claimed tasks whose worker is no longer active.
+- Running tasks whose worker is no longer active.
 - Failed tasks that are transient versus genuinely broken.
 - Duplicate tasks already replaced by successful work.
 - Human actions that are pending or resolved.

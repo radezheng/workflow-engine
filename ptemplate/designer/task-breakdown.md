@@ -33,6 +33,10 @@
 
 标出必须等待 human action 的任务。保持任务图足够小，失败后容易 retry、fix 或 supersede。
 
-通过 HWE CLI/API 创建结果任务，不要只描述。使用 `hwe task create`，并尽量显式设置 `--depends-on`、`--profile`、`--kind`、`--prompt-template-ref` 或 `--prompt-text`、`--gate`。不要删除或重写源 planning/design task；它们是证据。
+不要使用 Hermes 的交互式 clarify 流程。Headless HWE runner 无法回答实时 clarify；如果发现必须由用户确认的问题，请通过 `hwe human-action create` 创建真正的 HWE human action，或创建一个明确的 designer 研究任务来收集证据，并继续创建可以安全推进的任务图。不要用 `hwe task create --kind human-action` 伪造人工输入任务。
+
+通过 HWE CLI/API 创建结果任务，不要只描述。使用 prompt 中 HWE 控制面给出的 repo/config/CLI 命令，先用 `hwe config show` 或 prompt 中列出的 profile 清单确认真实 profile；只给真实存在的 profile 分配任务。使用 `hwe task create` 时尽量显式设置 `--depends-on`、`--profile`、`--kind`、`--prompt-template-ref` 或 `--prompt-text`、`--gate`，并用真实 task id 作为依赖。不要删除或重写源 planning/design task；它们是证据。
+
+如果计划中有 N 个后续任务，必须有 N 个真实 `hwe task create` 成功返回的 task id。不要把没有落库的任务写成 “Pending”、"intended graph" 或 “manually trigger later” 然后宣称成功。创建后运行 `hwe task list <project> <workflow-id>` 验证任务数量、profile、kind 和依赖释放结果：只有无依赖的根任务应为 `ready`；依赖未满足的后续任务必须是 `pending`。如果 CLI/API 没能创建完整 DAG，停止并把本任务完成为 `waiting_for_info` 或 `failed`，说明哪些任务没有落库以及原因。
 
 如果无法安全创建任务图，把本任务完成为 `waiting_for_info`，说明缺少的参数、profile、template、research 证据或审批。

@@ -18,10 +18,13 @@ import {
   RunSummary,
   Task,
   TaskRun,
+  WorkflowAction,
+  WorkflowTemplate,
   Workitem,
   answerHumanAction,
   approveHumanAction,
   archiveProject,
+  archiveWorkitem,
   createProject,
   createPromptTemplate,
   createWorkitem,
@@ -34,6 +37,7 @@ import {
   getRunLog,
   getTaskPromptPreview,
   getTaskRuns,
+  getWorkflowTemplates,
   getWorkitems,
   materializePlan,
   planWorkitem,
@@ -41,6 +45,7 @@ import {
   rejectHumanAction,
   releaseTask,
   restoreProject,
+  restoreWorkitem,
   retryTask,
   runTask,
   runWorkitem,
@@ -78,31 +83,11 @@ function runSummaryMessage(summary: RunSummary, taskTitle?: string) {
   return `Run Next: started ${summary.tasks_started} task(s).`;
 }
 
-function buildPlanBreakdownPrompt(project: ProjectRecord, workitem: Workitem, task: Task, stdoutPath: string) {
-  return [
-    'Read the completed workitem plan file and decompose it into executable HWE tasks.',
-    '',
-    `Project root: ${project.root_path}`,
-    `Project id: ${project.id}`,
-    `Workitem id: ${workitem.id}`,
-    `Workitem title: ${workitem.title}`,
-    `Workflow id: ${task.workflow_id}`,
-    `Source planning task id: ${task.id}`,
-    `Plan stdout path: ${stdoutPath}`,
-    '',
-    'Use the plan file as the source of truth. Do not infer tasks from this prompt alone.',
-    'Create focused HWE tasks by running `hwe task create` commands from the workflow-engine environment.',
-    'Use designer for clarification/design, coder for implementation slices, reviewer for review/QA/acceptance, and command/http_check for deterministic verification.',
-    'Preserve dependencies from the plan, include prompt templates where useful, and include gates/outputs that prove completion.',
-    'If the plan file lacks enough information to create safe tasks, request a human action instead of guessing.',
-  ].join('\n');
-}
-
 export function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [workitems, setWorkitems] = useState<Workitem[]>([]);
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
-  const [plannerTemplates, setPlannerTemplates] = useState<PromptTemplate[]>([]);
+  const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplate[]>([]);
   const [profiles, setProfiles] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState<ProjectRecord | null>(null);
   const [selectedWorkitem, setSelectedWorkitem] = useState<Workitem | null>(null);
@@ -122,8 +107,10 @@ export function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [autoRun, setAutoRun] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [showArchivedWorkitems, setShowArchivedWorkitems] = useState(false);
   const [materializeTask, setMaterializeTask] = useState<Task | null>(null);
-  const [materializePromptTemplateRef, setMaterializePromptTemplateRef] = useState('designer/task-breakdown');
+  const [materializeWorkflowAction, setMaterializeWorkflowAction] = useState<WorkflowAction | null>(null);
+  const [materializePromptTemplateRef, setMaterializePromptTemplateRef] = useState('');
   const [materializePromptText, setMaterializePromptText] = useState('');
   const autoRunRef = useRef(false);
   const [activeView, setActiveView] = useState<ConsoleView>('workflow');
@@ -236,11 +223,11 @@ export function App() {
       setSelectedWorkitem(null);
       return;
     }
-    const items = await getWorkitems(selectedProject.project_ref, selectedProject.id);
+    const items = await getWorkitems(selectedProject.project_ref, selectedProject.id, showArchivedWorkitems);
     if (!isCurrent()) return;
     setWorkitems(items);
-    setSelectedWorkitem((current) => current && items.some((item) => item.id === current.id) ? current : items[0] ?? null);
-  }, [selectedProject]);
+    setSelectedWorkitem((current) => current ? items.find((item) => item.id === current.id) ?? items[0] ?? null : items[0] ?? null);
+  }, [selectedProject, showArchivedWorkitems]);
 
   useEffect(() => {
     let active = true;
@@ -253,15 +240,18 @@ export function App() {
   useEffect(() => {
     if (!selectedProject) {
       setPromptTemplates([]);
-      setPlannerTemplates([]);
+      setWorkflowTemplates([]);
       return;
     }
     let active = true;
-    void getPromptTemplates(selectedProject.project_ref, selectedProject.id)
-      .then((templates) => {
+    void Promise.all([
+      getPromptTemplates(selectedProject.project_ref, selectedProject.id),
+      getWorkflowTemplates(selectedProject.project_ref, selectedProject.id),
+    ])
+      .then(([templates, workflows]) => {
         if (!active) return;
         setPromptTemplates(templates);
-        setPlannerTemplates(templates.filter((template) => template.role === 'planner'));
+        setWorkflowTemplates(workflows);
       })
       .catch((error) => {
         if (active) setMessage(error instanceof Error ? error.message : String(error));
@@ -273,7 +263,6 @@ export function App() {
     if (!selectedProject) return [];
     const templates = await getPromptTemplates(selectedProject.project_ref, selectedProject.id);
     setPromptTemplates(templates);
-    setPlannerTemplates(templates.filter((template) => template.role === 'planner'));
     return templates;
   }, [selectedProject]);
 
@@ -306,6 +295,7 @@ export function App() {
   const currentDashboard = dashboard && selectedWorkitem && dashboard.workitem.id === selectedWorkitem.id ? dashboard : null;
   const selectedTask = currentDashboard?.tasks.find((task) => task.id === selectedTaskId) ?? null;
   const selectedProjectArchived = selectedProject?.status === 'archived';
+  const selectedWorkitemArchived = selectedWorkitem?.status === 'archived';
   const taskCounts = useMemo(() => summarizeTasks(currentDashboard?.tasks ?? []), [currentDashboard]);
   const taskQueueLoading = Boolean(selectedWorkitem && (dashboardLoading || !currentDashboard));
   const selectedTaskEvents = useMemo(() => {
@@ -462,9 +452,14 @@ export function App() {
       if (!planRun?.stdout_path) {
         throw new Error('Plan task has no successful stdout run to materialize.');
       }
+      const action = task.workflow_actions?.materialize_plan;
+      if (!action?.workflow_template_id || !action.prompt_template_ref) {
+        throw new Error('No workflow template materialization action is available for this task.');
+      }
       setMaterializeTask(task);
-      setMaterializePromptTemplateRef('designer/task-breakdown');
-      setMaterializePromptText(buildPlanBreakdownPrompt(selectedProject, selectedWorkitem, task, planRun.stdout_path));
+      setMaterializeWorkflowAction(action);
+      setMaterializePromptTemplateRef(action.prompt_template_ref);
+      setMaterializePromptText('');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -475,11 +470,15 @@ export function App() {
   async function handleSubmitMaterializePlan() {
     if (!selectedProject || !materializeTask) return;
     const task = materializeTask;
+    const action = materializeWorkflowAction;
+    if (!action) return;
     await runAction(`materialize:${task.id}`, async () => {
       const result = await materializePlan(selectedProject.project_ref, selectedProject.id, task.id, {
-        profile: 'designer',
+        workflow_template_id: action.workflow_template_id,
+        parameters: action.parameters ?? {},
+        profile: action.profile,
         prompt_template_ref: materializePromptTemplateRef,
-        prompt_text: materializePromptText,
+        prompt_text: materializePromptText.trim() || undefined,
       });
       const nextTask = result.created[0] ?? result.skipped[0];
       if (nextTask) {
@@ -488,6 +487,7 @@ export function App() {
         setRunLog(null);
       }
       setMaterializeTask(null);
+      setMaterializeWorkflowAction(null);
     });
   }
 
@@ -556,7 +556,7 @@ export function App() {
     setMessage('');
     try {
       const createdWorkitem = await createWorkitem(selectedProject.project_ref, selectedProject.id, input);
-      const items = await getWorkitems(selectedProject.project_ref, selectedProject.id);
+      const items = await getWorkitems(selectedProject.project_ref, selectedProject.id, showArchivedWorkitems);
       setWorkitems(items);
       setSelectedWorkitem(items.find((item) => item.id === createdWorkitem.id) ?? createdWorkitem);
       setDashboard(null);
@@ -564,6 +564,46 @@ export function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
       throw error;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleArchiveWorkitem(workitem: Workitem) {
+    if (!selectedProject) return;
+    if (!window.confirm(`Archive ${workitem.title}? Its workflow history will be kept.`)) return;
+    setBusyAction(`archive-workitem:${workitem.id}`);
+    setMessage('Archiving workitem...');
+    try {
+      await archiveWorkitem(selectedProject.project_ref, selectedProject.id, workitem.id);
+      const items = await getWorkitems(selectedProject.project_ref, selectedProject.id, showArchivedWorkitems);
+      setWorkitems(items);
+      const replacement = items.find((item) => item.id === workitem.id) ?? items[0] ?? null;
+      setSelectedWorkitem(replacement);
+      if (!replacement || replacement.id !== workitem.id) {
+        setDashboard(null);
+        clearTaskSelection();
+      }
+      setMessage(`${workitem.title} archived.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleRestoreWorkitem(workitem: Workitem) {
+    if (!selectedProject) return;
+    setBusyAction(`restore-workitem:${workitem.id}`);
+    setMessage('Restoring workitem...');
+    try {
+      await restoreWorkitem(selectedProject.project_ref, selectedProject.id, workitem.id);
+      const items = await getWorkitems(selectedProject.project_ref, selectedProject.id, showArchivedWorkitems);
+      setWorkitems(items);
+      setSelectedWorkitem(items.find((item) => item.id === workitem.id) ?? workitem);
+      setMessage(`${workitem.title} restored.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyAction(null);
     }
@@ -652,10 +692,10 @@ export function App() {
         <Topbar
           selectedProject={selectedProject}
           selectedWorkitem={selectedWorkitem}
-          disabled={!selectedProject || !selectedWorkitem || selectedProjectArchived || busyAction !== null}
+          disabled={!selectedProject || !selectedWorkitem || selectedProjectArchived || selectedWorkitemArchived || busyAction !== null}
           running={busyAction === 'run'}
           autoRun={autoRun}
-          autoDisabled={!selectedProject || !selectedWorkitem || selectedProjectArchived}
+          autoDisabled={!selectedProject || !selectedWorkitem || selectedProjectArchived || selectedWorkitemArchived}
           onAutoRunChange={handleAutoRunChange}
           onRunNext={() => void handleRunNext()}
         />
@@ -664,7 +704,7 @@ export function App() {
 
         {activeView === 'workflow' && <><div className="metrics-row" aria-label="Task status summary">
           <Metric label="Ready" value={taskCounts.ready} tone="ready" />
-          <Metric label="Claimed" value={taskCounts.claimed} tone="claimed" />
+          <Metric label="Running" value={taskCounts.running} tone="running" />
           <Metric label="Waiting" value={taskCounts.waiting} tone="waiting" />
           <Metric label="Failed" value={taskCounts.failed} tone="failed" />
           <Metric label="Done" value={taskCounts.done} tone="done" />
@@ -681,16 +721,17 @@ export function App() {
             <WorkitemList
               workitems={workitems}
               selectedWorkitem={selectedWorkitem}
-              plannerTemplates={plannerTemplates}
+              workflowTemplates={workflowTemplates}
               disabled={busyAction !== null || !selectedProject || selectedProjectArchived}
+              showArchived={showArchivedWorkitems}
               onSelectWorkitem={handleSelectWorkitem}
-              onPlanWorkitem={(workitem, promptTemplateRef) => selectedProject && void runAction(`plan:${workitem.id}`, async () => {
+              onArchiveWorkitem={(workitem) => void handleArchiveWorkitem(workitem)}
+              onRestoreWorkitem={(workitem) => void handleRestoreWorkitem(workitem)}
+              onShowArchivedChange={setShowArchivedWorkitems}
+              onPlanWorkitem={(workitem, workflowTemplateId, parameters) => selectedProject && void runAction(`plan:${workitem.id}`, async () => {
                 setSelectedWorkitem(workitem);
-                await planWorkitem(selectedProject.project_ref, selectedProject.id, workitem.id, promptTemplateRef);
+                await planWorkitem(selectedProject.project_ref, selectedProject.id, workitem.id, workflowTemplateId, parameters);
               })}
-              onSavePromptToProject={handleSavePromptToProject}
-              onSavePromptToPublic={handleSavePromptToPublic}
-              onDeletePrompt={handleDeletePrompt}
             />
           </section>
 
@@ -700,7 +741,7 @@ export function App() {
               tasks={currentDashboard?.tasks ?? []}
               selectedTask={selectedTask}
               loading={taskQueueLoading}
-              disabled={busyAction !== null || !selectedProject || selectedProjectArchived}
+              disabled={busyAction !== null || !selectedProject || selectedProjectArchived || selectedWorkitemArchived}
               onSelect={handleSelectTask}
               onRun={(task) => void handleRunTask(task)}
               onRetry={(task) => selectedProject && void runAction(task.id, () => retryTask(selectedProject.project_ref, task.id))}
@@ -746,6 +787,7 @@ export function App() {
             <HumanActionList
               actions={currentDashboard?.human_actions ?? []}
               disabled={busyAction !== null || !selectedProject || selectedProjectArchived}
+              assistContext={selectedProject ? { project_ref: selectedProject.project_ref, project_id: selectedProject.id } : {}}
               onAnswer={(action, text) => selectedProject && runAction(action.id, () => answerHumanAction(selectedProject.project_ref, action.id, text))}
               onApprove={(action, text) => selectedProject && runAction(action.id, () => approveHumanAction(selectedProject.project_ref, action.id, text))}
               onReject={(action, reason) => selectedProject && runAction(action.id, () => rejectHumanAction(selectedProject.project_ref, action.id, reason))}
@@ -761,7 +803,10 @@ export function App() {
           disabled={busyAction !== null}
           onPromptTemplateRefChange={setMaterializePromptTemplateRef}
           onPromptTextChange={setMaterializePromptText}
-          onClose={() => setMaterializeTask(null)}
+          onClose={() => {
+            setMaterializeTask(null);
+            setMaterializeWorkflowAction(null);
+          }}
           onSubmit={() => void handleSubmitMaterializePlan()}
         />
 

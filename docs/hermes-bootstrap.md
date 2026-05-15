@@ -129,9 +129,7 @@ If HWE will dispatch work to multiple Hermes profiles, verify each target profil
 Run doctor before mutating workflow state on a new machine, after changing config, or whenever project discovery/profile routing looks wrong:
 
 ```bash
-"$HWE_PYTHON" "$HWE_REPO/.agents/skills/hwe/scripts/doctor.py" \
-  --repo "$HWE_REPO" \
-  --config "$HWE_CONFIG"
+"$HWE" doctor --repo "$HWE_REPO" --config "$HWE_CONFIG"
 ```
 
 Doctor reports `OK`, `WARN`, and `FAIL` findings for repo discovery, CLI executable, config loading, workspace/template paths, project database reachability, profiles, switch commands, healthchecks, and AI provider URLs.
@@ -139,11 +137,10 @@ Doctor reports `OK`, `WARN`, and `FAIL` findings for repo discovery, CLI executa
 Doctor can apply only safe local fixes such as creating configured local directories:
 
 ```bash
-"$HWE_PYTHON" "$HWE_REPO/.agents/skills/hwe/scripts/doctor.py" \
-  --repo "$HWE_REPO" \
-  --config "$HWE_CONFIG" \
-  --fix
+"$HWE" doctor --repo "$HWE_REPO" --config "$HWE_CONFIG" --fix
 ```
+
+The legacy script path `$HWE_REPO/.agents/skills/hwe/scripts/doctor.py` remains as a compatibility wrapper around the package implementation, but agents should prefer the CLI command.
 
 Ask the user before changing credentials, ports, database/container lifecycle, schemas, profile commands, model switch commands, API/UI service lifecycle, or overwriting an existing profile-local skill.
 

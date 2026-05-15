@@ -32,6 +32,7 @@ export function TaskQueue({ tasks, selectedTask, loading, disabled, onSelect, on
           onRun={() => onRun(task)}
           onRetry={() => onRetry(task)}
           onRelease={() => onRelease(task)}
+          canMaterializePlan={Boolean(task.workflow_actions?.materialize_plan)}
           onMaterializePlan={() => onMaterializePlan(task)}
         />
       ))}

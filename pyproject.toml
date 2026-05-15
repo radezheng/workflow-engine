@@ -22,6 +22,9 @@ hwe = "hermes_workflow_engine.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+hermes_workflow_engine = ["workflow_templates/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

@@ -10,18 +10,18 @@ type TaskRowProps = {
   onRun: () => void;
   onRetry: () => void;
   onRelease: () => void;
+  canMaterializePlan: boolean;
   onMaterializePlan: () => void;
 };
 
 function actionHint(task: Task) {
-  if (task.status === 'claimed') return 'Claimed by a runner';
+  if (task.status === 'running') return 'Running in a worker';
   if (task.status === 'pending') return 'Waiting on dependencies';
   if (task.status === 'waiting_for_info' || task.status === 'waiting_for_approval') return 'Needs human input';
   return '';
 }
 
-export function TaskRow({ task, selected, disabled, onSelect, onRun, onRetry, onRelease, onMaterializePlan }: TaskRowProps) {
-  const canMaterializePlan = task.kind === 'planning' && task.status === 'succeeded';
+export function TaskRow({ task, selected, disabled, onSelect, onRun, onRetry, onRelease, canMaterializePlan, onMaterializePlan }: TaskRowProps) {
   const hint = actionHint(task);
   return (
     <article className={selected ? 'task-row selected' : 'task-row'}>
@@ -43,8 +43,8 @@ export function TaskRow({ task, selected, disabled, onSelect, onRun, onRetry, on
             <RotateCcw size={15} />
           </button>
         )}
-        {task.status === 'claimed' && (
-          <button title="Release abandoned claim" disabled={disabled} onClick={onRelease}>
+        {task.status === 'running' && (
+          <button title="Release abandoned run" disabled={disabled} onClick={onRelease}>
             <Pause size={15} />
           </button>
         )}

@@ -1,0 +1,101 @@
+id: software-project-dev
+name: Software Project Development
+description: Staged HWE workflow for local software project delivery.
+version: 1
+parameters:
+  designer_profile:
+    default: designer
+    description: Profile that owns PM clarification, planning, and design.
+  coder_profile:
+    default: coder
+    description: Profile used by generated implementation tasks.
+  reviewer_profile:
+    default: reviewer
+    description: Profile used by generated review, QA, and acceptance tasks.
+  plan_prompt_template:
+    default: designer/workitem-plan
+  technical_design_prompt_template:
+    default: designer/technical-design
+  task_breakdown_prompt_template:
+    default: designer/task-breakdown
+  planning_review_prompt_template:
+    default: reviewer/planning-review
+profiles:
+  designer: ${designer_profile}
+  coder: ${coder_profile}
+  reviewer: ${reviewer_profile}
+prompt_templates:
+  workitem_plan: ${plan_prompt_template}
+  technical_design: ${technical_design_prompt_template}
+  task_breakdown: ${task_breakdown_prompt_template}
+  planning_review: ${planning_review_prompt_template}
+planning_task:
+  stage: workitem-plan
+  title: 规划 workitem
+  kind: planning
+  profile: ${designer_profile}
+  prompt_template_ref: ${plan_prompt_template}
+  prompt_text: 为这个 workitem 制定执行策略，并提出后续 task-breakdown 可物化的任务候选。不要在本 planning 任务中直接创建实现/评审任务。
+  skills: [hwe]
+  outputs: [工作流计划, 任务图候选]
+  gates: [计划覆盖需求, 任务候选包含角色和依赖, 包含验证任务建议]
+  priority: 10
+review_tasks:
+  - stage: workitem-plan-review
+    title: Review workitem plan before task breakdown
+    kind: review
+    profile: ${reviewer_profile}
+    prompt_template_ref: ${planning_review_prompt_template}
+    prompt_text: |
+      Review the upstream workitem plan before task breakdown. Verify requirements coverage, dependency shape, human-action needs, profile/template choices, deterministic verification plan, and whether the plan is specific enough to materialize. If the plan is not materializable, fail with concrete blocking findings instead of approving.
+    outputs: [plan review findings, materialization approval or blocking gaps]
+    gates: [plan is materializable, dependencies are coherent, verification and review tasks are required]
+    skills: [hwe]
+    priority_offset: 1
+materialize:
+  sources:
+    - stage: workitem-plan-review
+      prompt_template_ref: ${planning_review_prompt_template}
+      statuses: [succeeded]
+  task:
+    stage: task-breakdown
+    title: 将 plan 物化为可执行任务
+    kind: planning
+    profile: ${designer_profile}
+    prompt_template_ref: ${task_breakdown_prompt_template}
+    outputs: [已创建 HWE 任务图]
+    gates: [已阅读 plan/design 文件, 任务使用正确角色和依赖创建, 包含验证任务建议]
+    skills: [hwe]
+    priority_offset: 1
+  input_prompt: |
+    读取已完成的 workitem plan/design 文件，并将其拆解为可执行的 HWE Task 记录。
+
+    项目根目录：${project_root}
+    Project id：${project_id}
+    Workitem id：${workitem_id}
+    Workitem 标题：${workitem_title}
+    Workflow id：${workflow_id}
+    源 planning/design task id：${source_task_id}
+    Plan stdout 路径：${stdout_path}
+    Review stdout 路径：${review_stdout_path}
+
+    以 plan/design 文件为事实来源，并读取 review stdout 中的 blocking gaps/approval evidence。不要只根据本 prompt 摘要推断任务。
+    从 workflow-engine 环境运行 `hwe task create` 创建聚焦的 HWE 任务。
+    先验证 HWE config 中实际存在的 profiles；只把任务分配给真实可路由、技能和模板可用的 profile。
+    可用 profiles：designer=${profile.designer}, coder=${profile.coder}, reviewer=${profile.reviewer}
+    为每一步选择合适的 prompt template；必要时创建项目本地 override 到 `.engine/prompt-templates/<role>/<name>.md`。
+    保留 plan/design 中的依赖关系，加入能证明完成的 gates/outputs。
+    创建完整 DAG 后必须验证：只有无依赖根任务为 ready，依赖未满足的后续任务为 pending；不要把未落库的任务写成 Pending prose。
+    如果 plan/design 文件信息不足以安全创建任务，请请求 human action，不要猜测。
+
+    可调用的子 workflow templates：
+    ${child_workflows}
+child_workflows:
+  - id: qa
+    template: qa-review
+    trigger: implementation slices and deterministic checks are complete
+    description: Use for focused QA, regression review, runtime smoke, and acceptance evidence.
+  - id: publish
+    template: publish-release
+    trigger: reviewer acceptance succeeds and release/publish is authorized
+    description: Use for packaging, deployment, release notes, and post-publish verification.

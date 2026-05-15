@@ -10,7 +10,7 @@ import pytest
 from hermes_workflow_engine.cli import main
 from hermes_workflow_engine.config import HWEConfig
 from hermes_workflow_engine.project_runtime import ProjectRuntime
-from hermes_workflow_engine.project_storage import ProjectStorage
+from hermes_workflow_engine.project_storage import ProjectStorage, ProjectStorageError
 
 
 @pytest.fixture(autouse=True)
@@ -55,12 +55,12 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     assert second_task["status"] == "pending"
     assert storage.list_workitems(project["id"])[0]["status"] == "in_progress"
 
-    claimed = storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="reviewer")
-    assert claimed is not None
-    assert claimed["id"] == first_task["id"]
-    assert claimed["status"] == "claimed"
-    assert claimed["attempt"] == 1
-    assert claimed["claim_id"].startswith("claim_")
+    running = storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="reviewer")
+    assert running is not None
+    assert running["id"] == first_task["id"]
+    assert running["status"] == "running"
+    assert running["attempt"] == 1
+    assert running["claim_id"].startswith("claim_")
     assert storage.list_workitems(project["id"])[0]["status"] == "in_progress"
 
     completed = storage.complete_task(first_task["id"])
@@ -80,6 +80,7 @@ def test_project_workitem_workflow_task_lifecycle(tmp_path: Path) -> None:
     event_types = [event["type"] for event in events]
     assert "project_upserted" in event_types
     assert "task_ready" in event_types
+    assert "task_running" in event_types
     assert "task_completed" in event_types
     assert (project_root / ".engine" / "engine.db").exists()
 
@@ -97,6 +98,32 @@ def test_list_workitems_orders_newest_first(tmp_path: Path) -> None:
     items = storage.list_workitems(project["id"])
 
     assert [item["id"] for item in items] == [newer["id"], older["id"]]
+
+
+def test_workitem_archive_restore_hides_and_preserves_synced_status(tmp_path: Path) -> None:
+    project_root = tmp_path / "archive-workitem"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("archive-workitem")
+    workitem = storage.create_workitem(project["id"], "Archived feature")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(workflow["id"], "Implement archived feature", kind="agent", profile="coder")
+    storage.complete_task(task["id"])
+
+    assert storage.list_workitems(project["id"])[0]["status"] == "succeeded"
+
+    archived = storage.archive_workitem(workitem["id"])
+
+    assert archived["status"] == "archived"
+    assert storage.list_workitems(project["id"]) == []
+    assert storage.list_workitems(project["id"], include_archived=True)[0]["status"] == "archived"
+
+    restored = storage.restore_workitem(workitem["id"])
+
+    assert restored["status"] == "succeeded"
+    assert storage.list_workitems(project["id"])[0]["id"] == workitem["id"]
+    event_types = [event["type"] for event in storage.list_events(project["id"])]
+    assert "workitem_archived" in event_types
+    assert "workitem_restored" in event_types
 
 
 def test_project_init_cli_writes_project_database(tmp_path: Path, capsys) -> None:
@@ -231,6 +258,89 @@ def test_human_action_approval_cli_resumes_task(tmp_path: Path, capsys) -> None:
     assert tasks[0]["status"] == "ready"
 
 
+def test_human_action_create_cli(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "human-action-create"
+    assert main(["project", "init", str(project_root), "--id", "human-action-create"]) == 0
+    capsys.readouterr()
+
+    assert main(["workitem", "create", str(project_root), "Clarify indicators", "--project-id", "human-action-create"]) == 0
+    workitem = json.loads(capsys.readouterr().out)
+    assert main(["workflow", "create", str(project_root), workitem["id"], "--project-id", "human-action-create"]) == 0
+    workflow = json.loads(capsys.readouterr().out)
+
+    assert main(
+        [
+            "human-action",
+            "create",
+            str(project_root),
+            "Confirm credit-cycle indicators",
+            "--project-id",
+            "human-action-create",
+            "--workitem-id",
+            workitem["id"],
+            "--workflow-id",
+            workflow["id"],
+            "--body",
+            "Confirm the indicator set before source research.",
+            "--question",
+            "Which credit-cycle indicators should be in scope?",
+            "--option",
+            "Credit/GDP, policy rates, private-sector debt",
+            "--requested-by",
+            "designer",
+        ]
+    ) == 0
+    action = json.loads(capsys.readouterr().out)
+    assert action["kind"] == "info_request"
+    assert action["status"] == "pending"
+    assert action["questions"] == [{"id": "q1", "question": "Which credit-cycle indicators should be in scope?"}]
+    assert action["options"] == ["Credit/GDP, policy rates, private-sector debt"]
+
+    assert main(["human-action", "list", str(project_root), "--project-id", "human-action-create", "--status", "pending"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["id"] == action["id"]
+
+
+def test_task_create_rejects_fake_human_action_kind(tmp_path: Path) -> None:
+    project_root = tmp_path / "reject-fake-human-task"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("reject-fake-human-task")
+    workitem = storage.create_workitem(project["id"], "Clarify scope")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+
+    with pytest.raises(ProjectStorageError, match="Human input must be represented"):
+        storage.create_task(workflow["id"], "Fake human action", kind="human-action", profile="default")
+
+
+def test_standalone_pending_human_action_blocks_workitem_success(tmp_path: Path) -> None:
+    project_root = tmp_path / "standalone-human-action"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("standalone-human-action")
+    workitem = storage.create_workitem(project["id"], "Clarify indicators")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(workflow["id"], "Plan research", kind="command", profile="command")
+    storage.complete_task(task["id"], status="succeeded")
+
+    assert storage.get_workitem(workitem["id"])["status"] == "succeeded"
+
+    action = storage.create_human_action(
+        project["id"],
+        kind="info_request",
+        title="Confirm indicators",
+        body="Choose the core indicator set before continuing.",
+        workitem_id=workitem["id"],
+        workflow_id=workflow["id"],
+        questions=[{"id": "q1", "question": "Which indicators are in scope?"}],
+        options=["Credit/GDP and policy rates"],
+        requested_by="reviewer",
+    )
+
+    assert storage.get_workitem(workitem["id"])["status"] == "waiting_for_human"
+
+    storage.resolve_human_action(action["id"], resolution="answered", response={"text": "Credit/GDP and policy rates"}, resolved_by="human")
+
+    assert storage.get_workitem(workitem["id"])["status"] == "succeeded"
+
+
 def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
     project_root = tmp_path / "runtime-project"
     storage = ProjectStorage(project_root)
@@ -242,7 +352,7 @@ def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
         "Write marker",
         kind="command",
         profile="command",
-        prompt_text="python3 -c \"from pathlib import Path; Path('marker.txt').write_text('ok', encoding='utf-8')\"",
+        prompt_text="python3 -c \"from pathlib import Path; import sys; Path('marker.txt').write_text('ok', encoding='utf-8'); print('console-out'); print('console-err', file=sys.stderr)\"",
         outputs=["marker.txt"],
     )
 
@@ -254,8 +364,15 @@ def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
     assert (project_root / "marker.txt").read_text(encoding="utf-8") == "ok"
     assert storage.get_task(task["id"])["status"] == "succeeded"
     run = storage.list_task_runs(task_id=task["id"])[0]
-    assert Path(run["stdout_path"]).exists()
-    assert Path(run["stderr_path"]).exists()
+    stdout_text = Path(run["stdout_path"]).read_text(encoding="utf-8")
+    stderr_text = Path(run["stderr_path"]).read_text(encoding="utf-8")
+    assert "kind: command" in stdout_text
+    assert "$ python3 -c" in stdout_text
+    assert "console-out" in stdout_text
+    assert "# HWE exit_code: 0" in stdout_text
+    assert "kind: command" in stderr_text
+    assert "console-err" in stderr_text
+    assert "# HWE exit_code: 0" in stderr_text
     event_types = [event["type"] for event in storage.list_events(project["id"])]
     assert "workitem_run_requested" in event_types
     assert "workitem_run_completed" in event_types
@@ -376,15 +493,15 @@ def test_project_runtime_http_check_failure_blocks_summary(tmp_path: Path) -> No
     assert summary.open == []
 
 
-def test_task_release_cli_returns_claimed_task_to_ready(tmp_path: Path, capsys) -> None:
+def test_task_release_cli_returns_running_task_to_ready(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "release-project"
     assert main(["project", "init", str(project_root), "--id", "release-project"]) == 0
     capsys.readouterr()
-    assert main(["workitem", "create", str(project_root), "Release claim", "--project-id", "release-project"]) == 0
+    assert main(["workitem", "create", str(project_root), "Release running task", "--project-id", "release-project"]) == 0
     workitem = json.loads(capsys.readouterr().out)
     assert main(["workflow", "create", str(project_root), workitem["id"], "--project-id", "release-project"]) == 0
     workflow = json.loads(capsys.readouterr().out)
-    assert main(["task", "create", str(project_root), workflow["id"], "Claim me", "--kind", "design", "--profile", "reviewer"]) == 0
+    assert main(["task", "create", str(project_root), workflow["id"], "Run me", "--kind", "design", "--profile", "reviewer"]) == 0
     task = json.loads(capsys.readouterr().out)
     assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-1", "--profile", "reviewer"]) == 0
     capsys.readouterr()
@@ -394,8 +511,29 @@ def test_task_release_cli_returns_claimed_task_to_ready(tmp_path: Path, capsys) 
 
     assert released["status"] == "ready"
     assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-2", "--profile", "reviewer"]) == 0
-    reclaimed = json.loads(capsys.readouterr().out)
-    assert reclaimed["id"] == task["id"]
+    rerun = json.loads(capsys.readouterr().out)
+    assert rerun["id"] == task["id"]
+
+
+def test_release_running_task_cancels_started_run(tmp_path: Path) -> None:
+    project_root = tmp_path / "release-started-run"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("release-started-run")
+    workitem = storage.create_workitem(project["id"], "Release abandoned run")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(workflow["id"], "Run then abandon", kind="design", profile="reviewer")
+    running = storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="reviewer")
+    run = storage.create_task_run(task["id"], claim_id=running["claim_id"], profile="reviewer")
+
+    released = storage.release_task_claim(task["id"], reason="abandoned-run")
+
+    assert released["status"] == "ready"
+    cancelled_run = storage.get_task_run(run["id"])
+    assert cancelled_run["status"] == "cancelled"
+    assert cancelled_run["result"] == {"reason": "abandoned-run", "released": True}
+    event = [event for event in storage.list_events(project["id"]) if event["type"] == "task_run_finished"][-1]
+    assert event["run_id"] == run["id"]
+    assert event["payload"]["status"] == "cancelled"
 
 
 def test_task_retry_cli_returns_failed_task_to_ready(tmp_path: Path, capsys) -> None:
@@ -417,8 +555,8 @@ def test_task_retry_cli_returns_failed_task_to_ready(tmp_path: Path, capsys) -> 
 
     assert retried["status"] == "ready"
     assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-1", "--profile", "reviewer"]) == 0
-    reclaimed = json.loads(capsys.readouterr().out)
-    assert reclaimed["id"] == task["id"]
+    rerun = json.loads(capsys.readouterr().out)
+    assert rerun["id"] == task["id"]
 
 
 def test_superseded_task_is_terminal_and_unblocks_dependencies(tmp_path: Path, capsys) -> None:
@@ -485,6 +623,9 @@ def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) ->
     assert "## 需求" in prompt_text
     assert "## 约束" in prompt_text
     assert "## 声明的技能" in prompt_text
+    assert "## HWE 控制面" in prompt_text
+    assert "HWE CLI" in prompt_text
+    assert "不要使用未配置的 researcher/architect/developer/analyst" in prompt_text
     assert "如果缺少必要信息" in prompt_text
     assert "# HWE Project Task" not in prompt_text
     assert "## Requirements" not in prompt_text
@@ -529,7 +670,17 @@ def test_project_runtime_runs_profile_switch_before_agent(tmp_path: Path) -> Non
     assert summary.tasks_succeeded == 1
     assert storage.get_task(task["id"])["status"] == "succeeded"
     assert switch_marker.read_text(encoding="utf-8") == "switched"
-    assert (project_root / "hermes_invoked.txt").read_text(encoding="utf-8").startswith("chat -Q --source workflow-engine")
+    assert (project_root / "hermes_invoked.txt").read_text(encoding="utf-8").startswith("chat -p coder -Q --source workflow-engine")
+    run = storage.list_task_runs(task_id=task["id"])[0]
+    stdout_text = Path(run["stdout_path"]).read_text(encoding="utf-8")
+    stderr_text = Path(run["stderr_path"]).read_text(encoding="utf-8")
+    assert "kind: agent" in stdout_text
+    assert "profile: coder" in stdout_text
+    assert "chat -p coder -Q --source workflow-engine" in stdout_text
+    assert "prompt.md" in stdout_text
+    assert "Do the work." not in stdout_text
+    assert "kind: agent" in stderr_text
+    assert "# HWE exit_code: 0" in stderr_text
 
 
 def test_project_runtime_tolerates_profile_switch_failure_by_default(tmp_path: Path) -> None:
