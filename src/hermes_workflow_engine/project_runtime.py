@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,6 +16,9 @@ from typing import Any
 
 from .config import HWEConfig, load_config
 from .project_storage import ProjectStorage, ProjectStorageError, TASK_DONE_STATUSES
+
+
+HERMES_SESSION_ID_PATTERN = re.compile(r"session_id:\s*([A-Za-z0-9_-]+)")
 
 
 @dataclass(frozen=True)
@@ -139,11 +143,37 @@ class ProjectRuntime:
             with stderr_path.open("a", encoding="utf-8") as stderr:
                 stderr.write("Unhandled HWE task runtime exception.\n")
                 stderr.write("".join(traceback.format_exception(exc)))
+        except (KeyboardInterrupt, SystemExit) as exc:
+            result = {"error": "runtime_interrupted", "type": type(exc).__name__, "message": str(exc)}
+            with stderr_path.open("a", encoding="utf-8") as stderr:
+                stderr.write("HWE task runtime interrupted; marking task cancelled before shutdown.\n")
+                stderr.write("".join(traceback.format_exception(exc)))
+            prompt_for_run = prompt_path if prompt_path.exists() else prompt_for_run
+            self.storage.finish_task_run(
+                run["id"],
+                status="cancelled",
+                exit_code=None,
+                result=result,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                prompt_path=prompt_for_run,
+            )
+            self.storage.complete_task(
+                task["id"],
+                status="cancelled",
+                result={"run_id": run["id"], **result},
+                requested_by=task.get("profile"),
+                run_id=run["id"],
+            )
+            raise
 
         human_action_title = result.pop("_human_action_title", None)
         human_action_body = result.pop("_human_action_body", None)
         human_action_questions = result.pop("_human_action_questions", None)
         human_action_evidence = result.pop("_human_action_evidence", None)
+        hermes_session_id = _hermes_session_id_from_log(stderr_path)
+        if hermes_session_id and "hermes_session_id" not in result:
+            result["hermes_session_id"] = hermes_session_id
         self.storage.finish_task_run(
             run["id"],
             status=status,
@@ -347,6 +377,18 @@ class ProjectRuntime:
                 stdout=stdout,
                 stderr=stderr,
             )
+            process_group_id: int | None = None
+            if hasattr(os, "getpgid"):
+                try:
+                    process_group_id = os.getpgid(process.pid)
+                except OSError:
+                    process_group_id = None
+            process_payload = {"run_id": stdout_path.parent.name, "pid": process.pid, "pgid": process_group_id, "profile": profile_name}
+            stdout.write(f"Hermes process started pid={process.pid} pgid={process_group_id}\n")
+            stderr.write(f"Hermes process started pid={process.pid} pgid={process_group_id}\n")
+            stdout.flush()
+            stderr.flush()
+            self.storage.event(task["project_id"], task["workitem_id"], task["workflow_id"], task["id"], "task_process_started", process_payload, run_id=stdout_path.parent.name)
             try:
                 return_code = process.wait(timeout=int(profile_config.get("timeout_seconds", 3600)))
             except subprocess.TimeoutExpired:
@@ -355,6 +397,23 @@ class ProjectRuntime:
                 timed_out = True
                 stderr.write(f"Hermes command timed out after {profile_config.get('timeout_seconds', 3600)} seconds.\n")
                 stderr.flush()
+            except (KeyboardInterrupt, SystemExit):
+                if process.poll() is None:
+                    stderr.write(f"HWE runner interrupted while Hermes process pid={process.pid} was active; terminating child.\n")
+                    stderr.flush()
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        stderr.write(f"Hermes process pid={process.pid} ignored terminate; killing child.\n")
+                        stderr.flush()
+                        process.kill()
+                        process.wait()
+                stderr.write("Hermes command interrupted by HWE runner shutdown.\n")
+                stderr.flush()
+                raise
+            if return_code < 0:
+                stderr.write(f"Hermes command terminated by signal {-return_code}.\n")
             stderr.write(_exit_code_log(return_code))
             stderr.flush()
 
@@ -530,7 +589,7 @@ class ProjectRuntime:
         model = healthcheck.get("model", profile_config.get("model", ""))
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": "healthcheck"}],
+            "messages": [{"role": "user", "content": "reply '1"}],
             "max_tokens": 4,
         }
         last_error: Exception | None = None
@@ -649,6 +708,13 @@ def _stdout_has_clarify_timeout(stdout_path: Path) -> bool:
     except OSError:
         return False
     return "clarify timed out" in stdout_text.lower()
+
+
+def _hermes_session_id_from_log(stderr_path: Path) -> str | None:
+    if not stderr_path.exists():
+        return None
+    matches = HERMES_SESSION_ID_PATTERN.findall(stderr_path.read_text(encoding="utf-8", errors="replace"))
+    return matches[-1] if matches else None
 
 
 def _write_clarification_file(run_dir: Path, *, prompt_path: Path, stdout_path: Path, stderr_path: Path, timeout_seconds: int) -> Path:

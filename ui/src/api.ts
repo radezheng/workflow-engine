@@ -90,11 +90,41 @@ export type TaskRun = {
   result: Record<string, unknown>;
 };
 
+export type RunStream = 'stdout' | 'stderr' | 'prompt';
+export type RunView = RunStream | 'timeline';
+
 export type RunLog = {
   run_id: string;
-  stream: 'stdout' | 'stderr' | 'prompt';
+  stream: RunStream;
   path?: string;
   text: string;
+};
+
+export type RunTimelineToolCall = {
+  id?: string | null;
+  type?: string | null;
+  name?: string | null;
+  arguments: string;
+};
+
+export type RunTimelineEvent = {
+  index: number;
+  role: string;
+  timestamp?: string | null;
+  content: string;
+  tool_call_id?: string | null;
+  tool_calls: RunTimelineToolCall[];
+  finish_reason?: string | null;
+};
+
+export type RunTimeline = {
+  run_id: string;
+  session_id: string | null;
+  status: 'ok' | 'missing_session_id' | 'missing_session_log' | string;
+  path?: string;
+  searched_paths?: string[];
+  session?: Record<string, unknown> | null;
+  events: RunTimelineEvent[];
 };
 
 export type HumanAction = {
@@ -408,6 +438,13 @@ export async function updateTask(projectRef: string, taskId: string, input: Upda
   });
 }
 
+export async function reassignTask(projectRef: string, taskId: string, input: { project_id: string; profile: string | null; reason?: string }): Promise<Task> {
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/tasks/${encodeURIComponent(taskId)}/reassign`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 export async function getTaskPromptPreview(projectRef: string, projectId: string, taskId: string): Promise<TaskPromptPreview> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/tasks/${encodeURIComponent(taskId)}/prompt-preview?project_id=${encodeURIComponent(projectId)}`);
 }
@@ -425,6 +462,10 @@ export async function getTaskRuns(projectRef: string, taskId: string): Promise<T
 
 export async function getRunLog(projectRef: string, runId: string, stream: RunLog['stream']): Promise<RunLog> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/runs/${encodeURIComponent(runId)}/logs?stream=${stream}`);
+}
+
+export async function getRunTimeline(projectRef: string, runId: string): Promise<RunTimeline> {
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/runs/${encodeURIComponent(runId)}/timeline`);
 }
 
 export async function answerHumanAction(projectRef: string, actionId: string, text: string): Promise<HumanAction> {

@@ -507,6 +507,24 @@ class ProjectStorage:
         )
         return self.get_task(task_id)
 
+    def reassign_task_profile(self, task_id: str, *, profile: str | None, reason: str = "reassigned") -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if task["status"] not in {"pending", "ready"}:
+            raise ProjectStorageError("Only pending or ready tasks can be reassigned.")
+        normalized_profile = profile if profile and profile.strip() else None
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute("UPDATE tasks SET profile=?, updated_at=? WHERE id=?", (normalized_profile, timestamp, task_id))
+        self.event(
+            task["project_id"],
+            task["workitem_id"],
+            task["workflow_id"],
+            task_id,
+            "task_reassigned",
+            {"previous_profile": task.get("profile"), "profile": normalized_profile, "reason": reason},
+        )
+        return self.get_task(task_id)
+
     def mark_ready_tasks(self, workflow_id: str) -> int:
         timestamp = now_iso()
         with self.connect() as connection:

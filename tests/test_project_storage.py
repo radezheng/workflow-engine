@@ -536,6 +536,34 @@ def test_release_running_task_cancels_started_run(tmp_path: Path) -> None:
     assert event["payload"]["status"] == "cancelled"
 
 
+def test_task_reassign_cli_changes_ready_task_profile_after_release(tmp_path: Path, capsys) -> None:
+    project_root = tmp_path / "reassign-project"
+    assert main(["project", "init", str(project_root), "--id", "reassign-project"]) == 0
+    capsys.readouterr()
+    assert main(["workitem", "create", str(project_root), "Reassign task", "--project-id", "reassign-project"]) == 0
+    workitem = json.loads(capsys.readouterr().out)
+    assert main(["workflow", "create", str(project_root), workitem["id"], "--project-id", "reassign-project"]) == 0
+    workflow = json.loads(capsys.readouterr().out)
+    assert main(["task", "create", str(project_root), workflow["id"], "Research data", "--kind", "research", "--profile", "default"]) == 0
+    task = json.loads(capsys.readouterr().out)
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-1", "--profile", "default"]) == 0
+    capsys.readouterr()
+    assert main(["task", "release", str(project_root), task["id"], "--reason", "switch-profile"]) == 0
+    capsys.readouterr()
+
+    assert main(["task", "reassign", str(project_root), task["id"], "--profile", "designer", "--reason", "switch-profile"]) == 0
+    reassigned = json.loads(capsys.readouterr().out)
+
+    assert reassigned["status"] == "ready"
+    assert reassigned["attempt"] == 1
+    assert reassigned["profile"] == "designer"
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-2", "--profile", "default"]) == 1
+    capsys.readouterr()
+    assert main(["task", "claim", str(project_root), workflow["id"], "--worker-id", "worker-3", "--profile", "designer"]) == 0
+    claimed = json.loads(capsys.readouterr().out)
+    assert claimed["id"] == task["id"]
+
+
 def test_task_retry_cli_returns_failed_task_to_ready(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "retry-project"
     assert main(["project", "init", str(project_root), "--id", "retry-project"]) == 0
@@ -720,6 +748,31 @@ def test_project_runtime_tolerates_profile_switch_failure_by_default(tmp_path: P
     run = storage.list_task_runs(task_id=task["id"])[0]
     assert "WARNING: Model switch command failed with exit code 7" in Path(run["stderr_path"]).read_text(encoding="utf-8")
     assert (project_root / "hermes_invoked.txt").exists()
+
+
+def test_project_runtime_interrupt_marks_run_and_task_cancelled(tmp_path: Path) -> None:
+    project_root = tmp_path / "interrupt-runtime"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("interrupt-runtime")
+    workitem = storage.create_workitem(project["id"], "Interrupt cleanly")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="reviewer")
+    task = storage.create_task(workflow["id"], "Interrupted agent", kind="agent", profile="coder", prompt_text="Do the work.")
+    running = storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="coder")
+    class InterruptingRuntime(ProjectRuntime):
+        def _run_agent_task(self, *args, **kwargs):
+            _ = args, kwargs
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        InterruptingRuntime(storage, config=HWEConfig(profiles={"coder": {}})).run_task(running)
+
+    cancelled_task = storage.get_task(task["id"])
+    run = storage.list_task_runs(task_id=task["id"])[0]
+
+    assert cancelled_task["status"] == "cancelled"
+    assert run["status"] == "cancelled"
+    assert run["result"]["error"] == "runtime_interrupted"
+    assert "HWE task runtime interrupted" in Path(run["stderr_path"]).read_text(encoding="utf-8")
 
 
 def test_project_runtime_runs_switch_commands_independently(tmp_path: Path) -> None:

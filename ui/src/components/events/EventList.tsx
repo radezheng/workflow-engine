@@ -1,4 +1,5 @@
 import type { ProjectEvent } from '../../api';
+import { formatUtc8 } from '../../lib/formatTime';
 
 function eventSummary(event: ProjectEvent) {
   const payload = event.payload;
@@ -27,7 +28,7 @@ export function EventList({ events, emptyText = 'None' }: { events: ProjectEvent
             {event.type}
             {eventSummary(event) && <small>{eventSummary(event)}</small>}
           </span>
-          <small>{event.created_at}</small>
+          <small>{formatUtc8(event.created_at)}</small>
         </article>
       ))}
     </div>

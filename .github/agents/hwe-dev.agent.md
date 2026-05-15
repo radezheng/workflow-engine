@@ -75,7 +75,7 @@ Storage and CLI currently support:
 - Project init/show/archive/restore/events. Archive is a soft project state that keeps workflow history intact while hiding the project from default project discovery.
 - Workitem create/list.
 - Workflow create.
-- Task create/list/claim/complete/release/retry.
+- Task create/list/claim/complete/release/reassign/retry.
 - Task statuses: `pending`, `ready`, `running`, `waiting_for_info`, `waiting_for_approval`, `succeeded`, `failed`, `cancelled`, `skipped`, `superseded`.
 - Terminal dependency-satisfying statuses: `succeeded`, `skipped`, `superseded`.
 - Human actions: information requests and approval requests, resolved through `answer`, `approve`, and `reject`.
@@ -186,8 +186,10 @@ AI provider config is for UI drafting and should use OpenAI-compatible chat comp
 - Profile `switch_commands` are best-effort by default and run independently, so an unload failure does not prevent the following load command. HWE logs failures as warnings and continues to the next switch step, then healthcheck/agent invocation. Use `switch_command_required: true` or per-step `required: true` only when a failed switch must block execution. Legacy single-string `switch_command` still works for one-step switches.
 - Hermes hook and dangerous-command approval prompts are not HWE human actions. For trusted local profiles set `hooks_auto_accept: true` in the Hermes profile config or use `hermes_args: [--accept-hooks]`; do not use `--yolo` for routine HWE runs. HWE closes agent stdin so unexpected interactive prompts fail or receive EOF instead of hanging until timeout.
 - Hermes clarify timeouts are different from hook prompts. When Hermes logs `clarify timed out` and then the agent process times out, HWE should preserve run evidence in `clarification.md`, move the task to `waiting_for_info`, and create a pending human action; if Hermes did not emit the exact question, say that explicitly.
-- `task_run_started` events include the `run_id`; run stdout/stderr/prompt paths should be registered at run start so the UI/API can inspect active runs.
+- `task_run_started` events include the `run_id`; run stdout/stderr/prompt paths should be registered at run start so the UI/API can inspect active runs. When Hermes emits a `session_id`, store it on the run result and expose exact local session JSONL events through the run Timeline API/UI when the session log exists.
 - Push-style runner can be interrupted. A `running` task is not automatically stuck; inspect events, active task runs, logs, and known runner processes first. Use `hwe task release <project> <task-id> --reason abandoned-run` only after confirming the runner is gone or abandoned. Release marks any still-started task runs for that task as `cancelled` with the release reason. Do not run unmonitored background retry loops that repeatedly release and rerun the same task.
+- If HWE catches an interactive runner interrupt, it should mark the active run and task `cancelled`. A hard-killed API/runner process may still leave `started`/`running` state; inspect evidence, then release manually.
+- Use `hwe task reassign <project> <task-id> --profile <profile>` to change profile on a `pending` or `ready` task while preserving prior run history; release abandoned `running` tasks first.
 - Use `hwe task retry` for transient failures while preserving run history.
 - Use `superseded` for duplicate or obsolete tasks that were replaced by successful tasks, so summaries stay meaningful without deleting history.
 

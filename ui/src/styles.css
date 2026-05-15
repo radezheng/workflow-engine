@@ -1262,7 +1262,18 @@ select {
 
 .run-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.run-select-row select {
+  width: 100%;
+}
+
+.run-tab-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
   gap: 8px;
   align-items: center;
 }
@@ -1323,6 +1334,91 @@ select {
 .stream-tabs button.selected {
   background: #124a64;
   color: #fff;
+}
+
+.timeline-view {
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.timeline-meta,
+.timeline-event header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.timeline-meta span,
+.timeline-event header span,
+.timeline-event header time,
+.timeline-tool-id {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #eef1f5;
+  color: #445160;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.timeline-event {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #e4e8ee;
+  border-radius: 7px;
+  background: #fbfcfd;
+}
+
+.timeline-event.role-assistant {
+  border-left: 3px solid #124a64;
+}
+
+.timeline-event.role-tool {
+  border-left: 3px solid #a46a1c;
+}
+
+.timeline-event.role-user {
+  border-left: 3px solid #2e6f5c;
+}
+
+.timeline-event pre,
+.timeline-tool-call pre,
+.timeline-searched-paths {
+  margin: 0;
+  overflow: auto;
+  color: #1b2735;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.42;
+  white-space: pre-wrap;
+}
+
+.timeline-tool-call {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border-radius: 7px;
+  background: #f7f9fb;
+}
+
+.timeline-tool-call strong,
+.timeline-tool-call span {
+  overflow-wrap: anywhere;
+}
+
+.timeline-searched-paths {
+  padding: 8px;
+  border: 1px dashed #ccd4df;
+  border-radius: 7px;
+  background: #fff;
+  color: #596776;
 }
 
 @media (max-width: 940px) {

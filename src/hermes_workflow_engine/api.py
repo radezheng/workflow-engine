@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -32,6 +33,7 @@ from .workflow_templates import (
 
 PROJECT_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 LOCAL_CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$"
+HERMES_SESSION_ID_PATTERN = re.compile(r"session_id:\s*([A-Za-z0-9_-]+)")
 
 
 app = FastAPI(title="Hermes Workflow Engine API", version="0.1.0")
@@ -113,6 +115,12 @@ class TaskUpdateRequest(BaseModel):
     profile: str | None = None
     prompt_template_ref: str | None = None
     prompt_text: str | None = None
+
+
+class TaskReassignRequest(BaseModel):
+    project_id: str | None = None
+    profile: str | None = None
+    reason: str = "reassigned"
 
 
 class AIAssistMessage(BaseModel):
@@ -419,6 +427,50 @@ def read_run_log(project_ref: str, run_id: str, stream: Literal["stdout", "stder
     return {"run_id": run_id, "stream": stream, "path": str(path), "text": path.read_text(encoding="utf-8") if path.exists() else ""}
 
 
+@app.get("/api/projects/{project_ref}/runs/{run_id}/timeline")
+def read_run_timeline(project_ref: str, run_id: str, limit: int = Query(default=200, ge=1, le=1000)) -> dict[str, Any]:
+    storage = _storage(project_ref)
+    run = storage.get_task_run(run_id)
+    session_id = _run_hermes_session_id(storage, run)
+    if not session_id:
+        return {"run_id": run_id, "session_id": None, "session": None, "events": [], "status": "missing_session_id"}
+
+    session_paths = _hermes_session_paths(session_id, profile=run.get("profile"))
+    jsonl_path = next((path for path in session_paths["jsonl"] if path.exists()), None)
+    json_path = next((path for path in session_paths["json"] if path.exists()), None)
+    searched = [str(path) for paths in session_paths.values() for path in paths]
+    if jsonl_path is None:
+        json_events = _read_hermes_session_json_events(json_path, limit=limit) if json_path else []
+        if json_events:
+            return {
+                "run_id": run_id,
+                "session_id": session_id,
+                "session": _read_hermes_session_summary(json_path),
+                "events": json_events,
+                "status": "ok",
+                "path": str(json_path),
+                "searched_paths": searched,
+            }
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "session": _read_hermes_session_summary(json_path) if json_path else None,
+            "events": [],
+            "status": "missing_session_log",
+            "searched_paths": searched,
+        }
+
+    return {
+        "run_id": run_id,
+        "session_id": session_id,
+        "session": _read_hermes_session_summary(json_path),
+        "events": _read_hermes_session_events(jsonl_path, limit=limit),
+        "status": "ok",
+        "path": str(jsonl_path),
+        "searched_paths": searched,
+    }
+
+
 @app.get("/api/projects/{project_ref}/events")
 def list_events(project_ref: str, project_id: str | None = None, limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
     storage = _storage(project_ref)
@@ -571,6 +623,16 @@ def update_task(project_ref: str, task_id: str, request: TaskUpdateRequest) -> d
     return storage.update_task_definition(task_id, profile=request.profile, prompt_template_ref=prompt_template_ref, prompt_text=request.prompt_text)
 
 
+@app.post("/api/projects/{project_ref}/tasks/{task_id}/reassign")
+def reassign_task(project_ref: str, task_id: str, request: TaskReassignRequest) -> dict[str, Any]:
+    storage = _storage(project_ref)
+    task = storage.get_task(task_id)
+    project_id = _project_id(project_ref, request.project_id)
+    if task["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Task does not belong to project.")
+    return storage.reassign_task_profile(task_id, profile=request.profile, reason=request.reason)
+
+
 @app.get("/api/projects/{project_ref}/tasks/{task_id}/prompt-preview")
 def task_prompt_preview(project_ref: str, task_id: str, project_id: str | None = None) -> dict[str, Any]:
     storage = _storage(project_ref)
@@ -706,6 +768,158 @@ def _storage(project_ref: str) -> ProjectStorage:
         return storage
     except ProjectStorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _run_hermes_session_id(storage: ProjectStorage, run: dict[str, Any]) -> str | None:
+    result = run.get("result")
+    if isinstance(result, dict):
+        for key in ("hermes_session_id", "session_id"):
+            value = result.get(key)
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value):
+                return value
+
+    raw_path = run.get("stderr_path")
+    if not raw_path:
+        fallback_path = storage.engine_dir / "runs" / str(run["id"]) / "stderr.log"
+        raw_path = str(fallback_path) if fallback_path.exists() else None
+    if not raw_path:
+        return None
+
+    path = Path(str(raw_path))
+    _ensure_inside(path, storage.engine_dir)
+    if not path.exists():
+        return None
+    matches = HERMES_SESSION_ID_PATTERN.findall(path.read_text(encoding="utf-8", errors="replace"))
+    return matches[-1] if matches else None
+
+
+def _hermes_session_paths(session_id: str, *, profile: str | None = None) -> dict[str, list[Path]]:
+    roots = _hermes_session_roots(profile)
+    return {
+        "jsonl": [path for root in roots for path in (root / f"{session_id}.jsonl", root / f"session_{session_id}.jsonl")],
+        "json": [path for root in roots for path in (root / f"session_{session_id}.json", root / f"{session_id}.json")],
+    }
+
+
+def _hermes_session_roots(profile: str | None = None) -> list[Path]:
+    hermes_root = Path.home() / ".hermes"
+    roots: list[Path] = []
+
+    def add(root: Path) -> None:
+        if root not in roots:
+            roots.append(root)
+
+    add(hermes_root / "sessions")
+    profiles_root = hermes_root / "profiles"
+    if profile and re.fullmatch(r"[A-Za-z0-9_.-]+", profile):
+        add(profiles_root / profile / "sessions")
+    if profiles_root.exists():
+        for profile_root in sorted(path for path in profiles_root.iterdir() if path.is_dir()):
+            add(profile_root / "sessions")
+    return roots
+
+
+def _read_hermes_session_summary(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"path": str(path), "error": "unreadable_session_summary"}
+    return {
+        "path": str(path),
+        "session_id": data.get("session_id"),
+        "model": data.get("model"),
+        "base_url": data.get("base_url"),
+        "platform": data.get("platform"),
+        "session_start": data.get("session_start"),
+        "last_updated": data.get("last_updated"),
+        "message_count": data.get("message_count") or (len(data.get("messages", [])) if isinstance(data.get("messages"), list) else None),
+    }
+
+
+def _read_hermes_session_events(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if len(events) >= limit:
+                    break
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    item = json.loads(raw)
+                except json.JSONDecodeError:
+                    events.append({"index": line_number, "role": "raw", "timestamp": None, "content": raw, "tool_calls": []})
+                    continue
+                events.append(_hermes_session_event(line_number, item))
+    except OSError:
+        return []
+    return events
+
+
+def _read_hermes_session_json_events(path: Path | None, *, limit: int) -> list[dict[str, Any]]:
+    if path is None or not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return []
+    session_start = data.get("session_start") if isinstance(data.get("session_start"), str) else None
+    last_updated = data.get("last_updated") if isinstance(data.get("last_updated"), str) else None
+    message_items = [item for item in messages if isinstance(item, dict)]
+    events: list[dict[str, Any]] = []
+    total = len(message_items)
+    for index, item in enumerate(message_items, start=1):
+        if len(events) >= limit:
+            break
+        fallback_timestamp = _session_json_message_timestamp(index, total, session_start=session_start, last_updated=last_updated)
+        events.append(_hermes_session_event(index, item, fallback_timestamp=fallback_timestamp))
+    return events
+
+
+def _session_json_message_timestamp(index: int, total: int, *, session_start: str | None, last_updated: str | None) -> str | None:
+    if total <= 1:
+        return last_updated or session_start
+    if index == 1:
+        return session_start
+    if index == total:
+        return last_updated or session_start
+    return None
+
+
+def _hermes_session_event(index: int, item: dict[str, Any], *, fallback_timestamp: str | None = None) -> dict[str, Any]:
+    return {
+        "index": index,
+        "role": item.get("role") or item.get("type") or "unknown",
+        "timestamp": item.get("timestamp") or fallback_timestamp,
+        "content": _session_content_text(item.get("content")),
+        "tool_call_id": item.get("tool_call_id"),
+        "tool_calls": [_compact_tool_call(call) for call in item.get("tool_calls", []) if isinstance(call, dict)],
+        "finish_reason": item.get("finish_reason"),
+    }
+
+
+def _session_content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False)
+
+
+def _compact_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    return {
+        "id": call.get("id") or call.get("call_id"),
+        "type": call.get("type"),
+        "name": function.get("name") or call.get("name"),
+        "arguments": function.get("arguments") or call.get("arguments") or "",
+    }
 
 
 def _resolved_workflow_templates(config: HWEConfig, storage: ProjectStorage) -> list[dict[str, Any]]:

@@ -137,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
     task_release.add_argument("project")
     task_release.add_argument("task_id")
     task_release.add_argument("--reason", default="released")
+    task_reassign = task_subparsers.add_parser("reassign", help="Change the profile for a pending or ready task while preserving run history.")
+    task_reassign.add_argument("project")
+    task_reassign.add_argument("task_id")
+    task_reassign.add_argument("--profile", default=None)
+    task_reassign.add_argument("--reason", default="reassigned")
     task_retry = task_subparsers.add_parser("retry", help="Retry a failed or cancelled task by returning it to ready.")
     task_retry.add_argument("project")
     task_retry.add_argument("task_id")
@@ -411,6 +416,9 @@ def _handle_task(args: argparse.Namespace) -> int:
         return 0 if task else 1
     if args.task_command == "release":
         _print_json(storage.release_task_claim(args.task_id, reason=args.reason))
+        return 0
+    if args.task_command == "reassign":
+        _print_json(storage.reassign_task_profile(args.task_id, profile=args.profile, reason=args.reason))
         return 0
     if args.task_command == "retry":
         _print_json(storage.retry_task(args.task_id, reason=args.reason))

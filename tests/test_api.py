@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -593,6 +594,17 @@ profiles:
     )
     assert blocked.status_code == 400
 
+    reassign_target = storage.create_task(workflow["id"], "Reassign after release", kind="research", profile="default")
+    storage.claim_next_task(workflow["id"], worker_id="test", profile="default")
+    storage.release_task_claim(reassign_target["id"], reason="switch-profile")
+    reassigned = client.post(
+        f"/api/projects/edit-task/tasks/{reassign_target['id']}/reassign",
+        json={"project_id": "edit-task", "profile": "coder", "reason": "switch-profile"},
+    )
+    assert reassigned.status_code == 200
+    assert reassigned.json()["profile"] == "coder"
+    assert reassigned.json()["attempt"] == 1
+
 
 def test_api_lists_project_dashboard_and_runs_command_task(tmp_path: Path, monkeypatch) -> None:
     workspace_root = tmp_path / "workspace"
@@ -635,6 +647,120 @@ def test_api_lists_project_dashboard_and_runs_command_task(tmp_path: Path, monke
     logs = client.get(f"/api/projects/alpha/runs/{run_id}/logs", params={"stream": "stdout"})
     assert logs.status_code == 200
     assert logs.json()["stream"] == "stdout"
+
+
+def test_api_reads_hermes_session_timeline(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    config_path = tmp_path / "hwe.config.yaml"
+    config_path.write_text(f"default_workspace_root: {workspace_root}\n", encoding="utf-8")
+    monkeypatch.setenv("HWE_CONFIG", str(config_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    project_root = workspace_root / "timeline"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("timeline", project_id="timeline")
+    workitem = storage.create_workitem(project["id"], "Inspect worker timeline")
+    workflow = storage.create_workflow(project["id"], workitem["id"])
+    task = storage.create_task(workflow["id"], "Run agent", kind="agent", profile="coder")
+    storage.claim_next_task(workflow["id"], worker_id="test", profile="coder")
+    run = storage.create_task_run(task["id"], profile="coder")
+    run_dir = project_root / ".engine" / "runs" / run["id"]
+    run_dir.mkdir(parents=True)
+    stderr_path = run_dir / "stderr.log"
+    stderr_path.write_text("healthcheck ok\n\nsession_id: 20260515_160000_abc123\n", encoding="utf-8")
+    storage.finish_task_run(run["id"], status="succeeded", exit_code=0, result={"profile": "coder"}, stderr_path=stderr_path)
+
+    session_root = Path.home() / ".hermes" / "sessions"
+    session_root.mkdir(parents=True)
+    (session_root / "session_20260515_160000_abc123.json").write_text(
+        json.dumps({"session_id": "20260515_160000_abc123", "model": "local-model", "message_count": 3}),
+        encoding="utf-8",
+    )
+    jsonl_path = session_root / "20260515_160000_abc123.jsonl"
+    jsonl_path.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in [
+                {"role": "user", "content": "Do the task", "timestamp": "2026-05-15T16:00:00"},
+                {
+                    "role": "assistant",
+                    "content": "Checking files",
+                    "timestamp": "2026-05-15T16:00:01",
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"}}],
+                    "finish_reason": "tool_calls",
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "README content", "timestamp": "2026-05-15T16:00:02"},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = TestClient(app).get(f"/api/projects/timeline/runs/{run['id']}/timeline")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["session_id"] == "20260515_160000_abc123"
+    assert payload["session"]["model"] == "local-model"
+    assert payload["path"] == str(jsonl_path)
+    assert payload["events"][1]["tool_calls"][0]["name"] == "read_file"
+    assert payload["events"][2]["tool_call_id"] == "call_1"
+
+
+def test_api_reads_profile_session_json_timeline(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    config_path = tmp_path / "hwe.config.yaml"
+    config_path.write_text(f"default_workspace_root: {workspace_root}\n", encoding="utf-8")
+    monkeypatch.setenv("HWE_CONFIG", str(config_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    project_root = workspace_root / "profile-timeline"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("profile-timeline", project_id="profile-timeline")
+    workitem = storage.create_workitem(project["id"], "Inspect profile worker timeline")
+    workflow = storage.create_workflow(project["id"], workitem["id"])
+    task = storage.create_task(workflow["id"], "Run designer", kind="agent", profile="designer")
+    storage.claim_next_task(workflow["id"], worker_id="test", profile="designer")
+    run = storage.create_task_run(task["id"], profile="designer")
+    run_dir = project_root / ".engine" / "runs" / run["id"]
+    run_dir.mkdir(parents=True)
+    stderr_path = run_dir / "stderr.log"
+    stderr_path.write_text("session_id: 20260515_071932_832011\n", encoding="utf-8")
+    storage.finish_task_run(run["id"], status="succeeded", exit_code=0, result={"profile": "designer"}, stderr_path=stderr_path)
+
+    session_root = Path.home() / ".hermes" / "profiles" / "designer" / "sessions"
+    session_root.mkdir(parents=True)
+    session_path = session_root / "session_20260515_071932_832011.json"
+    session_path.write_text(
+        json.dumps(
+            {
+                "session_id": "20260515_071932_832011",
+                "model": "designer-model",
+                "session_start": "2026-05-15T07:19:32.448057",
+                "last_updated": "2026-05-15T07:21:50.506449",
+                "messages": [
+                    {"role": "user", "content": "Plan the workitem"},
+                    {"role": "assistant", "content": "Here is the plan", "finish_reason": "stop"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = TestClient(app).get(f"/api/projects/profile-timeline/runs/{run['id']}/timeline")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["path"] == str(session_path)
+    assert payload["session"]["model"] == "designer-model"
+    assert payload["events"][0]["content"] == "Plan the workitem"
+    assert payload["events"][0]["timestamp"] == "2026-05-15T07:19:32.448057"
+    assert payload["events"][1]["timestamp"] == "2026-05-15T07:21:50.506449"
+    assert payload["events"][1]["finish_reason"] == "stop"
 
 
 def test_api_task_retry_release_and_human_action_resolution(tmp_path: Path, monkeypatch) -> None:

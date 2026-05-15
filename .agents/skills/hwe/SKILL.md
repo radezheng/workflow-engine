@@ -178,7 +178,7 @@ Task statuses are `pending`, `ready`, `running`, `waiting_for_info`, `waiting_fo
 Before releasing a `running` task:
 
 1. Inspect events for `task_running`, `task_run_started`, `task_run_finished`, and `task_completed`.
-2. Inspect task runs and `.engine/runs/<run-id>/prompt.md`, `stdout.log`, and `stderr.log` when present.
+2. Inspect task runs and `.engine/runs/<run-id>/prompt.md`, `stdout.log`, and `stderr.log` when present; if Hermes emitted a `session_id`, use the UI Timeline tab or `/api/projects/<project>/runs/<run-id>/timeline` for visible Hermes session events.
 3. Check whether the runner process or terminal is still active if you started it.
 4. Release only when there is evidence the runner was interrupted, crashed, or abandoned.
 
@@ -187,9 +187,14 @@ Useful recovery commands:
 ```bash
 "$HWE" project events <project> --id <project-id> --limit 30
 "$HWE" task release <project> <task-id> --reason abandoned-run
+"$HWE" task reassign <project> <task-id> --profile designer --reason switch-profile
 "$HWE" task retry <project> <task-id> --reason transient-healthcheck
 "$HWE" task complete <project> <old-task-id> --status superseded --result-json '{"reason":"replacement task succeeded"}'
 ```
+
+Use `task reassign` only for `pending` or `ready` tasks; release an abandoned `running` task first so run history is cancelled cleanly before changing profiles.
+
+If HWE catches an interactive runner interrupt, it should mark the active run and task `cancelled`. A hard-killed API/runner process may still leave `started`/`running` state; inspect evidence, then release manually.
 
 Terminal dependency-satisfying statuses are `succeeded`, `skipped`, and `superseded`.
 

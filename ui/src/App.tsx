@@ -16,6 +16,8 @@ import {
   PromptTemplate,
   RunLog,
   RunSummary,
+  RunTimeline,
+  RunView,
   Task,
   TaskRun,
   WorkflowAction,
@@ -35,6 +37,7 @@ import {
   getProjects,
   getPromptTemplates,
   getRunLog,
+  getRunTimeline,
   getTaskPromptPreview,
   getTaskRuns,
   getWorkflowTemplates,
@@ -43,6 +46,7 @@ import {
   planWorkitem,
   publishPromptTemplate,
   rejectHumanAction,
+  reassignTask,
   releaseTask,
   restoreProject,
   restoreWorkitem,
@@ -97,8 +101,9 @@ export function App() {
   const [taskRuns, setTaskRuns] = useState<TaskRun[]>([]);
   const [taskRunsLoading, setTaskRunsLoading] = useState(false);
   const [selectedRun, setSelectedRun] = useState<TaskRun | null>(null);
-  const [logStream, setLogStream] = useState<RunLog['stream']>('stdout');
+  const [logStream, setLogStream] = useState<RunView>('stdout');
   const [runLog, setRunLog] = useState<RunLog | null>(null);
+  const [runTimeline, setRunTimeline] = useState<RunTimeline | null>(null);
   const [promptPreview, setPromptPreview] = useState('');
   const [promptPreviewLoading, setPromptPreviewLoading] = useState(false);
   const [taskDetailRefreshing, setTaskDetailRefreshing] = useState(false);
@@ -127,6 +132,7 @@ export function App() {
     setTaskRunsLoading(false);
     setSelectedRun(null);
     setRunLog(null);
+    setRunTimeline(null);
     setPromptPreview('');
     setPromptPreviewLoading(false);
   }
@@ -312,6 +318,7 @@ export function App() {
       setTaskRunsLoading(false);
       setSelectedRun(null);
       setRunLog(null);
+      setRunTimeline(null);
       return;
     }
     setTaskRunsLoading(true);
@@ -336,12 +343,21 @@ export function App() {
   useEffect(() => {
     if (!selectedProject || !selectedRun) {
       setRunLog(null);
+      setRunTimeline(null);
       return;
     }
     let active = true;
-    void getRunLog(selectedProject.project_ref, selectedRun.id, logStream)
-      .then((log) => { if (active) setRunLog(log); })
-      .catch((error) => { if (active) setMessage(error instanceof Error ? error.message : String(error)); });
+    if (logStream === 'timeline') {
+      setRunLog(null);
+      void getRunTimeline(selectedProject.project_ref, selectedRun.id)
+        .then((timeline) => { if (active) setRunTimeline(timeline); })
+        .catch((error) => { if (active) setMessage(error instanceof Error ? error.message : String(error)); });
+    } else {
+      setRunTimeline(null);
+      void getRunLog(selectedProject.project_ref, selectedRun.id, logStream)
+        .then((log) => { if (active) setRunLog(log); })
+        .catch((error) => { if (active) setMessage(error instanceof Error ? error.message : String(error)); });
+    }
     return () => { active = false; };
   }, [selectedProject, selectedRun, logStream]);
 
@@ -632,9 +648,11 @@ export function App() {
     await refreshPromptTemplates();
   }
 
-  async function handleUpdateTask(task: Task, input: { profile: string | null; prompt_template_ref: string | null; prompt_text: string | null }) {
+  async function handleUpdateTask(task: Task, input: { profile: string | null; prompt_template_ref?: string | null; prompt_text?: string | null }) {
     if (!selectedProject) return;
-    const updated = await updateTask(selectedProject.project_ref, task.id, { project_id: selectedProject.id, ...input });
+    const updated = task.attempt > 0
+      ? await reassignTask(selectedProject.project_ref, task.id, { project_id: selectedProject.id, profile: input.profile, reason: 'ui-profile-reassign' })
+      : await updateTask(selectedProject.project_ref, task.id, { project_id: selectedProject.id, ...input });
     setSelectedTaskId(updated.id);
     await refreshDashboard();
   }
@@ -655,10 +673,17 @@ export function App() {
       const activeRun = runs[0] ?? null;
       setSelectedRun(activeRun);
       if (activeRun) {
-        const latestLog = await getRunLog(project.project_ref, activeRun.id, logStream);
-        setRunLog(latestLog);
+        if (logStream === 'timeline') {
+          setRunTimeline(await getRunTimeline(project.project_ref, activeRun.id));
+          setRunLog(null);
+        } else {
+          const latestLog = await getRunLog(project.project_ref, activeRun.id, logStream);
+          setRunLog(latestLog);
+          setRunTimeline(null);
+        }
       } else {
         setRunLog(null);
+        setRunTimeline(null);
       }
       const preview = await getTaskPromptPreview(project.project_ref, project.id, refreshedTask.id);
       setPromptPreview(preview.text);
@@ -761,6 +786,7 @@ export function App() {
               selectedRun={selectedRun}
               stream={logStream}
               log={runLog}
+              timeline={runTimeline}
               promptPreview={promptPreview}
               promptPreviewLoading={promptPreviewLoading}
               refreshingLogs={taskDetailRefreshing}
