@@ -3,6 +3,9 @@ name: Software Project Development
 description: Staged HWE workflow for local software project delivery.
 version: 1
 parameters:
+  pm_profile:
+    default: ${designer_profile}
+    description: Profile that owns task post-execution decisions, recovery, and workflow-template improvement proposals.
   designer_profile:
     default: designer
     description: Profile that owns PM clarification, planning, and design.
@@ -20,7 +23,10 @@ parameters:
     default: designer/task-breakdown
   planning_review_prompt_template:
     default: reviewer/planning-review
+  recovery_prompt_template:
+    default: pm/recovery-plan
 profiles:
+  pm: ${pm_profile}
   designer: ${designer_profile}
   coder: ${coder_profile}
   reviewer: ${reviewer_profile}
@@ -29,6 +35,7 @@ prompt_templates:
   technical_design: ${technical_design_prompt_template}
   task_breakdown: ${task_breakdown_prompt_template}
   planning_review: ${planning_review_prompt_template}
+  recovery_plan: ${recovery_prompt_template}
 planning_task:
   stage: workitem-plan
   title: 规划 workitem
@@ -85,11 +92,50 @@ materialize:
     可用 profiles：designer=${profile.designer}, coder=${profile.coder}, reviewer=${profile.reviewer}
     为每一步选择合适的 prompt template；必要时创建项目本地 override 到 `.engine/prompt-templates/<role>/<name>.md`。
     保留 plan/design 中的依赖关系，加入能证明完成的 gates/outputs。
+    `kind=command` 的 `prompt_text` 必须是可直接执行的 shell 命令；不要把 PM/controller 意图、自然语言说明或“运行控制器逻辑”写成 command task。
     创建完整 DAG 后必须验证：只有无依赖根任务为 ready，依赖未满足的后续任务为 pending；不要把未落库的任务写成 Pending prose。
-    如果 plan/design 文件信息不足以安全创建任务，请请求 human action，不要猜测。
+    如果 plan/design 文件信息不足以安全创建任务，请请求 human action，不要猜测；创建 human action 后停止，不要同时创建或运行依赖未回答决策的任务。
 
     可调用的子 workflow templates：
     ${child_workflows}
+task_completion:
+  sources:
+    - statuses: [succeeded, failed, cancelled, skipped, superseded, waiting_for_info, waiting_for_approval]
+  post_execution:
+    stage: pm-task-completion-decision
+    title: "PM Decision: ${source_task_title}"
+    kind: post_execution
+    profile: ${pm_profile}
+    prompt_template_ref: ${recovery_prompt_template}
+    outputs: [推进决策, 后续任务或运行请求, workflow template 改进建议]
+    gates: [已检查 source run 证据, 已决定继续/等待/retry/fix/replace/redesign, 已提出必要的模板改进建议]
+    skills: [hwe]
+  input_prompt: |
+    一个 HWE task 已完成。作为 PM profile，请根据完成状态、run 证据、当前 workflow/task 图和项目环境决定下一步，并把结果落成 HWE 状态、任务或运行请求。
+
+    项目根目录：${project_root}
+    Project id：${project_id}
+    Workitem id：${workitem_id}
+    Workflow id：${workflow_id}
+    Source task id：${source_task_id}
+    Source task 标题：${source_task_title}
+    Source task kind/profile/status：${source_task_kind} / ${source_task_profile} / ${source_task_status}
+    Source run id：${source_run_id}
+    stdout 路径：${stdout_path}
+    stderr 路径：${stderr_path}
+    result JSON：${result_json}
+
+    HWE 控制面：
+    ${hwe_control_context}
+
+    先读取 stdout/stderr、source task 定义、依赖、当前 ready/pending/failed task、run requests 和项目文件结构，不要只根据标题判断。
+    根据证据选择推进路径：
+    1. succeeded/skipped/superseded：确认依赖释放和下一批 ready task 是否合理；如果决定继续，必须实际执行 HWE CLI 排队下一步 run request，例如 `hwe run-workitem <project> <workitem-id> --project-id <project-id> --max-tasks 1`，不要只在输出里说“will request”。
+    2. failed/cancelled：判断是 transient runner/model/tooling 问题、task 定义错误、产品/实现缺陷，还是计划/架构不成立；分别选择 retry、replacement + superseded、focused fix task，或重新设计/重新拆解。
+    3. waiting_for_info/waiting_for_approval：确认 human action 是否清楚、聚焦、带证据；必要时补充说明或停止等待用户。
+
+    需要推进状态时必须落到 HWE：创建 task、retry/reassign/complete task、创建 human action，或 enqueue run request。如果创建 replacement task，必须修正失败根因；如果 replacement 是 `kind=command`，`prompt_text` 必须是可直接执行的 shell 命令，不能是自然语言说明或 controller/PM 意图。如果下一步依赖用户回答，创建 human action 后必须停止，不要同时创建或运行依赖未回答决策的任务。不要删除历史，不要盲目 retry，不要把人工输入伪装成 task。
+    如果你发现当前 workflow template 需要改进来避免同类问题重犯或提升推进质量，请明确输出建议：应该修改哪个 template、哪个字段或 prompt、为什么，以及建议的 YAML/prompt 方向。不要直接修改 HWE 源码或公共模板，除非本 post-execution 明确授权你这么做。
 child_workflows:
   - id: qa
     template: qa-review

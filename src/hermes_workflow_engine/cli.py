@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from .config import ConfigError, HWEConfig, configured_config_path, load_config, write_config
 from .doctor import Doctor
-from .project_runtime import ProjectRuntime
+from .project_worker import ProjectWorker
 from .runtime import WorkflowRuntime
 from .spec import SpecError, load_workflow
 from .storage import Storage
@@ -52,6 +56,16 @@ def main(argv: list[str] | None = None) -> int:
     run_workitem_parser.add_argument("--profile", default=None)
     run_workitem_parser.add_argument("--max-tasks", type=int, default=None)
     run_workitem_parser.add_argument("--dry-run", action="store_true")
+    run_workitem_parser.add_argument("--api-url", default=None, help="HWE API base URL. Defaults to HWE_API_URL or http://127.0.0.1:8711.")
+    run_workitem_parser.add_argument("--local", action="store_true", help="Bypass the API and enqueue directly into project storage.")
+
+    worker_parser = subparsers.add_parser("worker", help="Run the HWE project worker that consumes queued run requests.")
+    worker_parser.add_argument("project", nargs="?", default=None, help="Optional project name/path/ref. Omit to process all discoverable projects.")
+    worker_parser.add_argument("--worker-id", default=None)
+    worker_parser.add_argument("--profile", default=None)
+    worker_parser.add_argument("--once", action="store_true", help="Process currently queued requests once and exit.")
+    worker_parser.add_argument("--max-requests", type=int, default=1, help="Maximum requests to process with --once.")
+    worker_parser.add_argument("--poll-interval", type=float, default=2.0)
 
     config_parser = subparsers.add_parser("config", help="Manage HWE local configuration.")
     config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
@@ -242,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_human_action(args)
         if args.command == "run-workitem":
             return _handle_run_workitem(args)
+        if args.command == "worker":
+            return _handle_worker(args)
         if args.command == "serve":
             return _handle_serve(args)
         if args.command == "doctor":
@@ -442,18 +458,47 @@ def _handle_task(args: argparse.Namespace) -> int:
 
 
 def _handle_run_workitem(args: argparse.Namespace) -> int:
-    storage = _project_storage(args.project)
     project_id = args.project_id or Path(args.project).expanduser().name
-    runtime = ProjectRuntime(storage, dry_run=args.dry_run)
-    summary = runtime.run_workitem(
-        project_id,
-        args.workitem_id,
-        worker_id=args.worker_id,
-        profile=args.profile,
-        max_tasks=args.max_tasks,
-    )
-    _print_json(summary.__dict__)
-    return 1 if summary.tasks_failed else 0
+    payload = {
+        "project_id": project_id,
+        "worker_id": args.worker_id,
+        "profile": args.profile,
+        "max_tasks": args.max_tasks,
+        "dry_run": args.dry_run,
+    }
+    if args.local:
+        storage = _project_storage(args.project)
+        _print_json(
+            storage.enqueue_run_request(
+                project_id,
+                args.workitem_id,
+                kind="workitem",
+                requested_worker_id=args.worker_id,
+                profile=args.profile,
+                max_tasks=args.max_tasks,
+                dry_run=args.dry_run,
+            )
+        )
+        return 0
+    api_url = (args.api_url or os.environ.get("HWE_API_URL") or "http://127.0.0.1:8711").rstrip("/")
+    project_ref = _api_project_ref(args.project)
+    path = f"/api/projects/{urllib.parse.quote(project_ref)}/workitems/{urllib.parse.quote(args.workitem_id)}/run"
+    _print_json(_api_json_request(api_url, path, payload))
+    return 0
+
+
+def _handle_worker(args: argparse.Namespace) -> int:
+    worker = ProjectWorker(worker_id=args.worker_id, profile=args.profile)
+    if args.once:
+        summary = worker.run_once(project_ref=args.project, max_requests=args.max_requests)
+        _print_json(summary.__dict__)
+        return 1 if summary.requests_failed else 0
+    try:
+        print(f"HWE worker started: worker_id={worker.worker_id} profile={args.profile or '*'} project={args.project or '*'}", file=sys.stderr)
+        worker.run_forever(project_ref=args.project, poll_interval_seconds=args.poll_interval)
+    except KeyboardInterrupt:
+        print("HWE worker interrupted.", file=sys.stderr)
+    return 0
 
 
 def _handle_human_action(args: argparse.Namespace) -> int:
@@ -561,6 +606,30 @@ def _json_option(value: str | None, label: str) -> dict[str, object] | None:
     if not isinstance(payload, dict):
         raise ProjectStorageError(f"{label} must be a JSON object.")
     return payload
+
+
+def _api_project_ref(project: str) -> str:
+    path = Path(project).expanduser()
+    if path.is_absolute() or len(path.parts) > 1:
+        return path.name
+    return project
+
+
+def _api_json_request(api_url: str, path: str, payload: dict[str, object]) -> dict[str, object]:
+    request = urllib.request.Request(
+        f"{api_url}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ProjectStorageError(f"HWE API request failed with HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise ProjectStorageError(f"HWE API is not reachable at {api_url}: {exc.reason}") from exc
 
 
 def _question_options(questions: list[str]) -> list[dict[str, object]]:

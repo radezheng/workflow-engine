@@ -39,7 +39,7 @@ Ask before changing credentials, ports, database/container lifecycle, schemas, p
 - When operating a workitem, follow the selected workflow template's API-reported stages, dependencies, gates, materialization source rules, and actions. The template is the source of flow truth.
 - Verify configured profiles, prompt template refs, and target-profile skill availability before creating agent tasks.
 - Convert unclear requirements, approvals, destructive operations, credentials, ports, data retention, external-service permissions, or product behavior into HWE human actions instead of guessing.
-- Keep runners visible. Do not start competing runners for the same workitem, and do not run unmonitored background retry loops.
+- Keep runners visible. Execution is driven by queued run requests consumed by `hwe worker`; do not start competing workers for the same profile/workitem, and do not run unmonitored background retry loops.
 
 ## Core Model
 
@@ -47,6 +47,7 @@ Ask before changing credentials, ports, database/container lifecycle, schemas, p
 - **Workitem**: the user-facing unit of delivery.
 - **Workflow**: the current execution strategy for one workitem.
 - **Task**: the worker-facing unit of execution. Tasks are narrow, auditable, dependency-aware records.
+- **Run request**: durable API/CLI request to execute one workitem or task. UI/API/CLI enqueue requests; `hwe worker` claims them and invokes `ProjectRuntime`.
 - **Workflow template**: YAML flow definition for profiles, prompt-template refs, planning/materialization task specs, source rules, gates, parameters, and child workflows. Built-ins ship with HWE; config templates live under `workflow_template_root`; project overrides live under `.engine/workflow-templates/`.
 - **Prompt template**: Markdown role prompt file under `prompt_template_root` or `.engine/prompt-templates/`. Prompt templates describe worker behavior; workflow templates decide flow.
 
@@ -121,11 +122,14 @@ curl -sS -X POST "$HWE_API_URL/api/projects/<project>/workitems/<workitem-id>/pl
   -d '{"project_id":"<project-id>","workflow_template_id":"<template-id>","parameters":{}}'
 ```
 
-Run ready tasks one at a time while dogfooding or debugging:
+Run ready tasks one at a time while dogfooding or debugging. Ensure the worker is running first:
 
 ```bash
+"$HWE" worker
 "$HWE" run-workitem <project> <workitem-id> --project-id <project-id> --max-tasks 1
 ```
+
+`run-workitem` defaults to the local API and returns a queued run request. Use `--local` only when the API is unavailable; it still enqueues a request for `hwe worker` to consume.
 
 Materialize only through an API-reported workflow action. Do not infer materialization eligibility from task title, kind, or prompt-template ref.
 
@@ -147,6 +151,7 @@ Profiles route agent tasks; they are not merely labels. Before assigning an agen
 Profile responsibility defaults:
 
 - Designer: PM clarification, planning, technical design.
+- PM: task post-execution decisions, continue/wait/retry/fix/replace/redesign routing, and workflow-template improvement proposals. Built-in templates default `pm_profile` to `designer` unless overridden.
 - Coder: focused implementation or fix slices only.
 - Reviewer: implementation review, QA review, test evidence, acceptance.
 - Deterministic verification: use `command` or `http_check`, not a Hermes profile.
@@ -168,6 +173,7 @@ Use real HWE human actions for uncertainty. Never create fake `kind=human-action
 ```
 
 A pending human action attached to a workitem or its current workflow blocks the workitem as `waiting_for_human`. Task-linked actions move the waiting task back to `ready` when answered or approved. Standalone actions only record the decision; the requesting worker must create or run a concrete continuation task.
+Workers should not claim ready tasks for a workitem while a workitem/workflow-level human action is pending.
 
 Hermes clarify timeouts are human-action material. If headless Hermes logs `clarify timed out` and the process times out, HWE preserves run evidence, marks the task `waiting_for_info`, and creates a pending human action.
 
@@ -194,7 +200,7 @@ Useful recovery commands:
 
 Use `task reassign` only for `pending` or `ready` tasks; release an abandoned `running` task first so run history is cancelled cleanly before changing profiles.
 
-If HWE catches an interactive runner interrupt, it should mark the active run and task `cancelled`. A hard-killed API/runner process may still leave `started`/`running` state; inspect evidence, then release manually.
+If HWE catches a worker interrupt, it should mark the active run and task `cancelled`. API server restarts should not kill in-flight tasks because execution belongs to `hwe worker`. A hard-killed worker process may still leave `started`/`running` state; inspect evidence, then release manually.
 
 Terminal dependency-satisfying statuses are `succeeded`, `skipped`, and `superseded`.
 
@@ -205,6 +211,10 @@ Final acceptance for runnable apps needs deterministic evidence when practical:
 - `command` tasks for install/build/tests/startup checks.
 - `http_check` tasks for health endpoints and representative runtime paths.
 - Reviewer acceptance based on run IDs, logs, commands, URLs, and observed outcomes.
+
+When any task finishes in a configured completion status, HWE automatically queues a workflow-template-defined `post_execution` run request when the template provides `task_completion`. This is not a PM task record; it is the completed task's controller hook. PM prompts include HWE CLI/control context. After successful PM post-execution for a successful/skipped/superseded source task, the worker enqueues a one-step workitem continuation when ready tasks exist and no queued workitem/task request already exists.
+
+Treat failed `command` and `http_check` tasks as workflow gate failures, not as prompts to blindly retry. Inspect stdout/stderr and the task definition first. If the command is wrong for the project shape, create a replacement verification task from the PM post-execution decision, run it, and mark the obsolete failed gate `superseded` only after replacement evidence succeeds. If the command is correct and exposes a product bug, create a focused fix task that depends on the failed gate evidence, then rerun or replace the verification task after the fix. PM post-execution must also note workflow-template or prompt-template improvements that would prevent the same failure pattern from recurring. Long-term recovery shape should live in workflow templates rather than ad hoc operator prose.
 
 `http_check` prompt text can be a URL or JSON request spec with `method`, `headers`, `json`, `body`, `expect_status`, `expect_json`, `expect_contains`, `retries`, `retry_delay_seconds`, and `timeout_seconds`.
 
@@ -222,6 +232,7 @@ Start the API from the HWE repository root or set `HWE_CONFIG` explicitly:
 ```bash
 cd "$HWE_REPO"
 HWE_CONFIG="$HWE_CONFIG" "$HWE" serve --host "${HWE_API_HOST:-127.0.0.1}" --port "${HWE_API_PORT:-8711}"
+HWE_CONFIG="$HWE_CONFIG" "$HWE" worker
 npm --prefix ui run dev -- --host "${HWE_UI_HOST:-127.0.0.1}" --port "${HWE_UI_PORT:-5173}"
 ```
 
@@ -240,4 +251,4 @@ HWE runtime handles profile preflight for agent tasks: `switch_commands`, option
 
 Model switching belongs in HWE profile config, not generated projects or prompts. `switch_commands` are best-effort by default; use required switches only when a failed switch must block. Configure observed successful non-zero exits with `success_exit_codes`.
 
-Hermes hook prompts are not HWE human actions. For trusted local profiles, use Hermes `hooks_auto_accept: true` or HWE `hermes_args: [--accept-hooks]`; do not use `--yolo` for routine HWE runs.
+Hermes hook prompts are not HWE human actions. For trusted local profiles, use Hermes `hooks_auto_accept: true` or HWE `hermes_args: [--accept-hooks]`; do not use `--yolo` for routine HWE runs. `--accept-hooks` does not approve dangerous-command prompts. If a trusted profile needs a narrower command exception, configure Hermes `command_allowlist` in the actual profile home used by HWE. Discover that home from the active Hermes installation, for example with `hermes profile show <profile>`, profile alias configuration, or the `HERMES_HOME` used when invoking the profile; do not assume the default Hermes config applies to isolated profiles.

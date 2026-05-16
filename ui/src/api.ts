@@ -215,6 +215,27 @@ export type RunSummary = {
   open: string[];
 };
 
+export type RunRequest = {
+  id: string;
+  project_id: string;
+  workitem_id: string;
+  workflow_id: string;
+  task_id: string | null;
+  kind: string;
+  status: string;
+  requested_worker_id: string | null;
+  worker_id: string | null;
+  profile: string | null;
+  max_tasks: number | null;
+  dry_run: boolean;
+  result: Record<string, unknown>;
+  error: string | null;
+  created_at: string;
+  claimed_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+
 export type CreateProjectInput = {
   name: string;
   project_ref?: string;
@@ -384,18 +405,22 @@ export async function getDashboard(projectRef: string, projectId: string, workit
   return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems/${encodeURIComponent(workitemId)}/dashboard?project_id=${encodeURIComponent(projectId)}`);
 }
 
-export async function runWorkitem(projectRef: string, projectId: string, workitemId: string): Promise<RunSummary> {
+export async function runWorkitem(projectRef: string, projectId: string, workitemId: string): Promise<RunRequest> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/workitems/${encodeURIComponent(workitemId)}/run`, {
     method: 'POST',
     body: JSON.stringify({ project_id: projectId, max_tasks: 1 }),
   });
 }
 
-export async function runTask(projectRef: string, projectId: string, taskId: string): Promise<RunSummary> {
+export async function runTask(projectRef: string, projectId: string, taskId: string): Promise<RunRequest> {
   return request(`/api/projects/${encodeURIComponent(projectRef)}/tasks/${encodeURIComponent(taskId)}/run`, {
     method: 'POST',
     body: JSON.stringify({ project_id: projectId }),
   });
+}
+
+export async function getRunRequest(projectRef: string, projectId: string, requestId: string): Promise<RunRequest> {
+  return request(`/api/projects/${encodeURIComponent(projectRef)}/run-requests/${encodeURIComponent(requestId)}?project_id=${encodeURIComponent(projectId)}`);
 }
 
 export async function planWorkitem(projectRef: string, projectId: string, workitemId: string, workflowTemplateId: string, parameters: Record<string, string> = {}): Promise<{ workflow: Workflow; task: Task; tasks: Task[] }> {

@@ -201,6 +201,31 @@ CREATE TABLE IF NOT EXISTS task_runs (
     FOREIGN KEY (claim_id) REFERENCES worker_claims(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_requests (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    workitem_id TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    requested_worker_id TEXT,
+    worker_id TEXT,
+    profile TEXT,
+    max_tasks INTEGER,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    claimed_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (workitem_id) REFERENCES workitems(id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id) REFERENCES project_workflows(id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS task_context_bundles (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
@@ -336,6 +361,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_workitem_status ON tasks(workitem_id, statu
 CREATE INDEX IF NOT EXISTS idx_task_deps_depends ON task_dependencies(depends_on_task_id);
 CREATE INDEX IF NOT EXISTS idx_claims_task_status ON worker_claims(task_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task_attempt ON task_runs(task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_run_requests_status ON run_requests(status, project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_human_actions_pending ON human_actions(project_id, status, kind);
 CREATE INDEX IF NOT EXISTS idx_decisions_workflow ON planner_decisions(workflow_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_events_lookup ON project_events(project_id, workitem_id, workflow_id, task_id, created_at);

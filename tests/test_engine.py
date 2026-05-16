@@ -13,6 +13,7 @@ from hermes_workflow_engine.runtime import WorkflowRuntime
 from hermes_workflow_engine.spec import load_workflow
 from hermes_workflow_engine.storage import Storage
 from hermes_workflow_engine.worker import WorkerAdapter
+from hermes_workflow_engine.workflow_templates import resolve_workflow_template
 
 
 def test_command_step_runs_and_records_state(tmp_path: Path) -> None:
@@ -144,32 +145,32 @@ def test_prompt_template_root_config_is_relative_to_hwe_config_directory(tmp_pat
 
 
 def test_doctor_cli_reports_config_and_repo(tmp_path: Path, capsys) -> None:
-        repo = tmp_path / "repo"
-        (repo / "src" / "hermes_workflow_engine").mkdir(parents=True)
-        (repo / "pyproject.toml").write_text("[project]\nname = 'hwe-test'\n", encoding="utf-8")
-        workspace = tmp_path / "workspace"
-        templates = tmp_path / "ptemplate"
-        workspace.mkdir()
-        (templates / "designer").mkdir(parents=True)
-        (templates / "designer" / "workitem-plan.md").write_text("Plan", encoding="utf-8")
-        config_path = tmp_path / "hwe.config.yaml"
-        config_path.write_text(
-                f"""
+    repo = tmp_path / "repo"
+    (repo / "src" / "hermes_workflow_engine").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[project]\nname = 'hwe-test'\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    templates = tmp_path / "ptemplate"
+    workspace.mkdir()
+    (templates / "designer").mkdir(parents=True)
+    (templates / "designer" / "workitem-plan.md").write_text("Plan", encoding="utf-8")
+    config_path = tmp_path / "hwe.config.yaml"
+    config_path.write_text(
+        f"""
 default_workspace_root: {workspace}
 prompt_template_root: {templates}
 project_database:
     backend: sqlite
 """,
-                encoding="utf-8",
-        )
+        encoding="utf-8",
+    )
 
-        assert cli_main(["doctor", "--repo", str(repo), "--config", str(config_path)]) == 0
-        output = capsys.readouterr().out
+    assert cli_main(["doctor", "--repo", str(repo), "--config", str(config_path)]) == 0
+    output = capsys.readouterr().out
 
-        assert "HWE Doctor Report" in output
-        assert "[OK] repo" in output
-        assert "[OK] config" in output
-        assert "[OK] project_database: Using SQLite project storage." in output
+    assert "HWE Doctor Report" in output
+    assert "[OK] repo" in output
+    assert "[OK] config" in output
+    assert "[OK] project_database: Using SQLite project storage." in output
 
 
 def test_hwe_config_loads_profile_preflight(tmp_path: Path) -> None:
@@ -195,6 +196,23 @@ profiles:
         "success_exit_codes": [0, -6],
     }
     assert config.profile_config("reviewer") == {}
+
+
+def test_workflow_template_parameter_defaults_can_reference_other_parameters() -> None:
+    template = resolve_workflow_template(
+        {
+            "id": "with-pm-default",
+            "parameters": {
+                "designer_profile": {"default": "designer"},
+                "pm_profile": {"default": "${designer_profile}"},
+            },
+            "profiles": {"pm": "${pm_profile}", "designer": "${designer_profile}"},
+        },
+        {"designer_profile": "default"},
+    )
+
+    assert template["resolved_parameters"]["pm_profile"] == "default"
+    assert template["profiles"]["pm"] == "default"
 
 
 def test_hwe_config_loads_ai_providers(tmp_path: Path) -> None:

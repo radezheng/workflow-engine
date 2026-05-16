@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from hermes_workflow_engine.api import app
 from hermes_workflow_engine.project_storage import ProjectStorage
+from hermes_workflow_engine.project_worker import ProjectWorker
 
 
 def test_api_cors_allows_localhost_any_port() -> None:
@@ -343,9 +344,13 @@ prompt_template_root: {template_root}
     templates = client.get("/api/projects/planner-project/workflow-templates", params={"project_id": "planner-project"})
     assert templates.status_code == 200
     software_template = next(item for item in templates.json() if item["id"] == "software-project-dev")
+    assert software_template["profiles"]["pm"] == "designer"
     assert software_template["profiles"]["designer"] == "designer"
     assert software_template["prompt_templates"]["workitem_plan"] == "designer/workitem-plan"
     assert software_template["prompt_templates"]["planning_review"] == "reviewer/planning-review"
+    assert software_template["prompt_templates"]["recovery_plan"] == "pm/recovery-plan"
+    assert software_template["task_completion"]["post_execution"]["profile"] == "designer"
+    assert software_template["task_completion"]["post_execution"]["prompt_template_ref"] == "pm/recovery-plan"
     assert software_template["child_workflows"][0]["template"] == "qa-review"
 
     planned = client.post(f"/api/projects/planner-project/workitems/{workitem.json()['id']}/plan", json={"project_id": "planner-project"})
@@ -638,7 +643,15 @@ def test_api_lists_project_dashboard_and_runs_command_task(tmp_path: Path, monke
 
     run = client.post(f"/api/projects/alpha/workitems/{workitem['id']}/run", json={"max_tasks": 1})
     assert run.status_code == 200
-    assert run.json()["tasks_succeeded"] == 1
+    request_id = run.json()["id"]
+    assert run.json()["status"] == "queued"
+    assert run.json()["kind"] == "workitem"
+    worker_summary = ProjectWorker(worker_id="api-test-worker").run_once(project_ref="alpha", max_requests=1)
+    assert worker_summary.requests_succeeded == 1
+    completed_request = client.get(f"/api/projects/alpha/run-requests/{request_id}")
+    assert completed_request.status_code == 200
+    assert completed_request.json()["status"] == "succeeded"
+    assert completed_request.json()["result"]["tasks_succeeded"] == 1
     assert (project_root / "marker.txt").read_text(encoding="utf-8") == "ok"
 
     runs = client.get(f"/api/projects/alpha/tasks/{task['id']}/runs")

@@ -931,6 +931,11 @@ select {
   background: #fbfcfd;
 }
 
+.human-action-pending {
+  border-color: #f0b8b5;
+  background: #fff8f7;
+}
+
 .task-row.selected {
   border-color: #17806d;
   background: #f2faf7;
@@ -1083,7 +1088,12 @@ select {
 .status-waiting-for-approval { background: #fff1d9; color: #8b5a12; }
 .status-failed,
 .status-cancelled { background: #fdeceb; color: #a72929; }
-.status-succeeded { background: #e9f4ea; color: #326938; }
+.status-succeeded,
+.status-answered,
+.status-approved { background: #e9f4ea; color: #326938; }
+.human-action .status-pending,
+.human-action-request .status-pending,
+.status-rejected { background: #fdeceb; color: #a72929; }
 .status-skipped,
 .status-superseded,
 .status-suspend,

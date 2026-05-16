@@ -74,6 +74,12 @@ def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def _decode_run_request(request: dict[str, Any]) -> dict[str, Any]:
+    request["result"] = json.loads(request.pop("result_json"))
+    request["dry_run"] = bool(request.get("dry_run"))
+    return request
+
+
 def _workitem_status_from_task_statuses(statuses: list[str], *, has_pending_human_action: bool = False) -> str:
     if has_pending_human_action:
         return "waiting_for_human"
@@ -554,6 +560,9 @@ class ProjectStorage:
 
     def claim_next_task(self, workflow_id: str, *, worker_id: str, profile: str | None = None, lease_seconds: int = 900) -> dict[str, Any] | None:
         self.mark_ready_tasks(workflow_id)
+        workflow = self.get_workflow(workflow_id)
+        if self._has_pending_human_action(workflow["workitem_id"], workflow_id):
+            return None
         timestamp = now_iso()
         expires_at = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
         claim_id = _id("claim")
@@ -591,6 +600,8 @@ class ProjectStorage:
         task = self.get_task(task_id)
         self.mark_ready_tasks(task["workflow_id"])
         task = self.get_task(task_id)
+        if self._has_pending_human_action(task["workitem_id"], task["workflow_id"]):
+            raise ProjectStorageError(f"Workitem is waiting for human input: {task['workitem_id']}")
         if task["status"] != "ready":
             raise ProjectStorageError(f"Task is not ready: {task_id}")
         if profile is not None and task.get("profile") not in {None, profile}:
@@ -662,6 +673,132 @@ class ProjectStorage:
         self.event(task["project_id"], task["workitem_id"], task["workflow_id"], task_id, "task_ready", {"reason": reason})
         self.sync_workitem_status(task["workitem_id"])
         return self.get_task(task_id)
+
+    def enqueue_run_request(
+        self,
+        project_id: str,
+        workitem_id: str,
+        *,
+        kind: str = "workitem",
+        task_id: str | None = None,
+        requested_worker_id: str | None = None,
+        profile: str | None = None,
+        max_tasks: int | None = 1,
+        dry_run: bool = False,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if kind not in {"workitem", "task", "post_execution"}:
+            raise ProjectStorageError(f"Invalid run request kind: {kind}")
+        workitem = self.get_workitem(workitem_id)
+        if workitem["project_id"] != project_id:
+            raise ProjectStorageError("Workitem does not belong to project.")
+        workflow = self.current_workflow_for_workitem(project_id, workitem_id)
+        if kind in {"task", "post_execution"}:
+            if not task_id:
+                raise ProjectStorageError(f"{kind} run request requires task_id.")
+            task = self.get_task(task_id)
+            if task["project_id"] != project_id or task["workitem_id"] != workitem_id or task["workflow_id"] != workflow["id"]:
+                raise ProjectStorageError("Task does not belong to workitem workflow.")
+        elif task_id is not None:
+            raise ProjectStorageError("Workitem run request cannot include task_id.")
+        timestamp = now_iso()
+        request_id = _id("req")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_requests(
+                    id, project_id, workitem_id, workflow_id, task_id, kind, status,
+                    requested_worker_id, profile, max_tasks, dry_run, result_json, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (request_id, project_id, workitem_id, workflow["id"], task_id, kind, requested_worker_id, profile, max_tasks, 1 if dry_run else 0, _json(context or {}), timestamp, timestamp),
+            )
+        request = self.get_run_request(request_id)
+        self.event(project_id, workitem_id, workflow["id"], task_id, "run_request_queued", {"request_id": request_id, "kind": kind, "profile": profile, "max_tasks": max_tasks})
+        return request
+
+    def claim_next_run_request(self, *, worker_id: str, profile: str | None = None, project_id: str | None = None) -> dict[str, Any] | None:
+        self.initialize()
+        timestamp = now_iso()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM run_requests
+                WHERE status='queued' AND (? IS NULL OR project_id=?) AND (? IS NULL OR profile IS NULL OR profile=?)
+                ORDER BY created_at
+                LIMIT 1
+                """,
+                (project_id, project_id, profile, profile),
+            ).fetchone()
+            if row is None:
+                return None
+            request = dict(row)
+            cursor = connection.execute(
+                """
+                UPDATE run_requests
+                SET status='running', worker_id=?, claimed_at=?, updated_at=?
+                WHERE id=? AND status='queued'
+                """,
+                (worker_id, timestamp, timestamp, request["id"]),
+            )
+            if getattr(cursor, "rowcount", 1) != 1:
+                return None
+        request = self.get_run_request(request["id"])
+        self.event(request["project_id"], request["workitem_id"], request["workflow_id"], request.get("task_id"), "run_request_running", {"request_id": request["id"], "worker_id": worker_id, "profile": profile})
+        return request
+
+    def complete_run_request(self, request_id: str, *, status: str, result: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:
+        request = self.get_run_request(request_id)
+        if request["status"] != "running":
+            raise ProjectStorageError(f"Run request is not running: {request_id}")
+        timestamp = now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE run_requests
+                SET status=?, result_json=?, error=?, completed_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (status, _json(result or {}), error, timestamp, timestamp, request_id),
+            )
+        completed = self.get_run_request(request_id)
+        self.event(completed["project_id"], completed["workitem_id"], completed["workflow_id"], completed.get("task_id"), "run_request_completed", {"request_id": request_id, "status": status, "error": error})
+        return completed
+
+    def get_run_request(self, request_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM run_requests WHERE id=?", (request_id,)).fetchone()
+        if row is None:
+            raise ProjectStorageError(f"Unknown run request: {request_id}")
+        return _decode_run_request(dict(row))
+
+    def list_run_requests(
+        self,
+        *,
+        project_id: str | None = None,
+        workitem_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        query = "SELECT * FROM run_requests WHERE 1=1"
+        params: list[Any] = []
+        if project_id:
+            query += " AND project_id=?"
+            params.append(project_id)
+        if workitem_id:
+            query += " AND workitem_id=?"
+            params.append(workitem_id)
+        if status:
+            query += " AND status=?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_decode_run_request(dict(row)) for row in rows]
 
     def create_task_run(self, task_id: str, *, claim_id: str | None = None, profile: str | None = None) -> dict[str, Any]:
         task = self.get_task(task_id)
@@ -1083,6 +1220,20 @@ class ProjectStorage:
         response_json = action.pop("response_json")
         action["response"] = json.loads(response_json) if response_json else None
         return action
+
+    def _has_pending_human_action(self, workitem_id: str, workflow_id: str | None = None) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM human_actions
+                WHERE status='pending'
+                  AND (workitem_id=? OR (? IS NOT NULL AND workflow_id=?))
+                LIMIT 1
+                """,
+                (workitem_id, workflow_id, workflow_id),
+            ).fetchone()
+        return row is not None
 
 
 class _PostgresConnection:

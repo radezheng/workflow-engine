@@ -13,6 +13,7 @@ from .config import HWEConfig
 DEFAULT_WORKFLOW_TEMPLATE_ID = "software-project-dev"
 _PARAM_PATTERN = re.compile(r"\$\{([A-Za-z0-9_.-]+)\}")
 _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+TASK_COMPLETION_STATUSES = ["succeeded", "failed", "cancelled", "skipped", "superseded", "waiting_for_info", "waiting_for_approval"]
 
 
 class WorkflowTemplateError(ValueError):
@@ -47,6 +48,7 @@ def resolve_workflow_template(raw_template: dict[str, Any], parameters: dict[str
     for key, value in (parameters or {}).items():
         if isinstance(key, str) and key.strip():
             params[key.strip()] = str(value)
+    params = _resolve_parameter_refs(params)
     profiles = _render_value(raw_template.get("profiles", {}), params)
     prompt_templates = _render_value(raw_template.get("prompt_templates", {}), {**params, **_prefixed("profile", profiles)})
     variables = {
@@ -95,6 +97,62 @@ def workflow_materialize_action(template: dict[str, Any], task: dict[str, Any]) 
     }
 
 
+def workflow_failure_recovery_action(template: dict[str, Any], task: dict[str, Any]) -> dict[str, Any] | None:
+    if task.get("status") != "failed":
+        return None
+    recovery = template.get("failure_recovery") if isinstance(template.get("failure_recovery"), dict) else None
+    if recovery is None:
+        return None
+    sources = recovery.get("sources") if isinstance(recovery.get("sources"), list) else [{"statuses": ["failed"]}]
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        statuses = source.get("statuses") if isinstance(source.get("statuses"), list) else ["failed"]
+        if task.get("status") not in statuses:
+            continue
+        kinds = source.get("kinds") if isinstance(source.get("kinds"), list) else []
+        if kinds and task.get("kind") not in kinds:
+            continue
+        profiles = source.get("profiles") if isinstance(source.get("profiles"), list) else []
+        if profiles and task.get("profile") not in profiles:
+            continue
+        task_spec = failure_recovery_task_spec(template)
+        return {
+            "workflow_template_id": template["id"],
+            "profile": task_spec.get("profile"),
+            "prompt_template_ref": task_spec.get("prompt_template_ref"),
+            "parameters": template.get("resolved_parameters", {}),
+        }
+    return None
+
+
+def workflow_task_completion_action(template: dict[str, Any], task: dict[str, Any]) -> dict[str, Any] | None:
+    completion = template.get("task_completion") if isinstance(template.get("task_completion"), dict) else None
+    if completion is None:
+        return None
+    sources = completion.get("sources") if isinstance(completion.get("sources"), list) else [{"statuses": TASK_COMPLETION_STATUSES}]
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        statuses = source.get("statuses") if isinstance(source.get("statuses"), list) else TASK_COMPLETION_STATUSES
+        if not _matches_source_value(task.get("status"), statuses):
+            continue
+        kinds = source.get("kinds") if isinstance(source.get("kinds"), list) else []
+        if kinds and not _matches_source_value(task.get("kind"), kinds):
+            continue
+        profiles = source.get("profiles") if isinstance(source.get("profiles"), list) else []
+        if profiles and not _matches_source_value(task.get("profile"), profiles):
+            continue
+        post_execution = task_completion_post_execution_spec(template)
+        return {
+            "workflow_template_id": template["id"],
+            "profile": post_execution.get("profile"),
+            "prompt_template_ref": post_execution.get("prompt_template_ref"),
+            "parameters": template.get("resolved_parameters", {}),
+        }
+    return None
+
+
 def planning_task_spec(template: dict[str, Any]) -> dict[str, Any]:
     spec = template.get("planning_task")
     if not isinstance(spec, dict):
@@ -113,6 +171,20 @@ def materialize_task_spec(template: dict[str, Any]) -> dict[str, Any]:
     return _materialize_task_spec(template)
 
 
+def failure_recovery_task_spec(template: dict[str, Any], variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    spec = _failure_recovery_task_spec(template)
+    if variables is None:
+        return spec
+    return _render_value(spec, {key: str(value) for key, value in variables.items()})
+
+
+def task_completion_post_execution_spec(template: dict[str, Any], variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    spec = _task_completion_post_execution_spec(template)
+    if variables is None:
+        return spec
+    return _render_value(spec, {key: str(value) for key, value in variables.items()})
+
+
 def workflow_stage_created_reason(template_id: str, stage_id: str) -> str:
     return f"workflow-template:{template_id}:stage:{stage_id}"
 
@@ -122,6 +194,22 @@ def render_materialize_prompt(template: dict[str, Any], variables: dict[str, Any
     prompt = materialize.get("input_prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowTemplateError(f"Workflow template `{template['id']}` has no materialize.input_prompt.")
+    return str(_render_value(prompt, {key: str(value) for key, value in variables.items()}))
+
+
+def render_failure_recovery_prompt(template: dict[str, Any], variables: dict[str, Any]) -> str:
+    recovery = template.get("failure_recovery") if isinstance(template.get("failure_recovery"), dict) else {}
+    prompt = recovery.get("input_prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise WorkflowTemplateError(f"Workflow template `{template['id']}` has no failure_recovery.input_prompt.")
+    return str(_render_value(prompt, {key: str(value) for key, value in variables.items()}))
+
+
+def render_task_completion_prompt(template: dict[str, Any], variables: dict[str, Any]) -> str:
+    completion = template.get("task_completion") if isinstance(template.get("task_completion"), dict) else {}
+    prompt = completion.get("input_prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise WorkflowTemplateError(f"Workflow template `{template['id']}` has no task_completion.input_prompt.")
     return str(_render_value(prompt, {key: str(value) for key, value in variables.items()}))
 
 
@@ -147,6 +235,31 @@ def _materialize_task_spec(template: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(task_spec, dict):
         raise WorkflowTemplateError(f"Workflow template `{template['id']}` has no materialize.task mapping.")
     return task_spec
+
+
+def _failure_recovery_task_spec(template: dict[str, Any]) -> dict[str, Any]:
+    recovery = template.get("failure_recovery") if isinstance(template.get("failure_recovery"), dict) else {}
+    task_spec = recovery.get("task")
+    if not isinstance(task_spec, dict):
+        raise WorkflowTemplateError(f"Workflow template `{template['id']}` has no failure_recovery.task mapping.")
+    return task_spec
+
+
+def _task_completion_post_execution_spec(template: dict[str, Any]) -> dict[str, Any]:
+    completion = template.get("task_completion") if isinstance(template.get("task_completion"), dict) else {}
+    post_execution = completion.get("post_execution")
+    if not isinstance(post_execution, dict):
+        raise WorkflowTemplateError(f"Workflow template `{template['id']}` has no task_completion.post_execution mapping.")
+    return post_execution
+
+
+def _matches_source_value(value: Any, accepted: list[Any]) -> bool:
+    normalized = "" if value is None else str(value)
+    for item in accepted:
+        candidate = str(item)
+        if candidate in {"*", "any", "all"} or normalized == candidate:
+            return True
+    return False
 
 
 def _builtin_templates() -> list[dict[str, Any]]:
@@ -193,6 +306,16 @@ def _default_parameters(template: dict[str, Any]) -> dict[str, str]:
             value = spec
         defaults[name] = str(value)
     return defaults
+
+
+def _resolve_parameter_refs(params: dict[str, str]) -> dict[str, str]:
+    resolved = dict(params)
+    for _ in range(10):
+        rendered = {key: str(_render_value(value, resolved)) for key, value in resolved.items()}
+        if rendered == resolved:
+            return rendered
+        resolved = rendered
+    return resolved
 
 
 def _prefixed(prefix: str, values: Any) -> dict[str, str]:

@@ -16,6 +16,14 @@
 			"isBackground": true,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "hwe: worker",
+			"type": "shell",
+			"command": "HWE_CONFIG=$PWD/hwe.config.yaml .venv/bin/hwe worker",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
 		}
 	]
 }

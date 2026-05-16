@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import json
 import re
+import signal
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 import traceback
 import urllib.error
@@ -16,9 +19,25 @@ from typing import Any
 
 from .config import HWEConfig, load_config
 from .project_storage import ProjectStorage, ProjectStorageError, TASK_DONE_STATUSES
+from .workflow_templates import (
+    DEFAULT_WORKFLOW_TEMPLATE_ID,
+    WorkflowTemplateError,
+    failure_recovery_task_spec,
+    list_workflow_templates,
+    render_failure_recovery_prompt,
+    render_task_completion_prompt,
+    resolve_workflow_template,
+    task_completion_post_execution_spec,
+    workflow_failure_recovery_action,
+    workflow_task_completion_action,
+)
 
 
 HERMES_SESSION_ID_PATTERN = re.compile(r"session_id:\s*([A-Za-z0-9_-]+)")
+
+
+class RuntimeSignalInterrupt(KeyboardInterrupt):
+    pass
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,7 @@ class ProjectRuntime:
         self.storage = storage
         self.dry_run = dry_run
         self.config = load_config() if config is None else config
+        self.last_post_execution_request: dict[str, Any] | None = None
 
     def run_workitem(
         self,
@@ -79,8 +99,12 @@ class ProjectRuntime:
             else:
                 tasks_failed += 1
                 break
+            if self.last_post_execution_request is not None:
+                break
 
         tasks = self.storage.list_tasks(workflow_id)
+        if waiting_for_human == 0:
+            waiting_for_human = _pending_human_action_count(self.storage, project_id, workitem_id, workflow_id)
         failed = [task["id"] for task in tasks if task["status"] in {"failed", "cancelled"}]
         blocked = [task["id"] for task in tasks if task["status"] == "pending"]
         open_tasks = [task["id"] for task in tasks if task["status"] not in TASK_DONE_STATUSES and task["status"] not in {"failed", "cancelled"}]
@@ -116,6 +140,7 @@ class ProjectRuntime:
         return summary
 
     def run_task(self, task: dict[str, Any]) -> str:
+        self.last_post_execution_request = None
         run = self.storage.create_task_run(task["id"], claim_id=task.get("claim_id"), profile=task.get("profile"))
         run_dir = self.storage.engine_dir / "runs" / run["id"]
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -126,16 +151,17 @@ class ProjectRuntime:
         prompt_for_run = None
 
         try:
-            if task["kind"] == "command":
-                status, exit_code, result = self._run_command_task(task, stdout_path, stderr_path)
-            elif task["kind"] == "http_check":
-                status, exit_code, result = self._run_http_check_task(task, stdout_path, stderr_path)
-            else:
-                prompt_text = self.build_task_prompt(task)
-                prompt_path.write_text(prompt_text, encoding="utf-8")
-                self.storage.update_task_run_paths(run["id"], prompt_path=prompt_path)
-                status, exit_code, result = self._run_agent_task(task, prompt_text, stdout_path, stderr_path)
-                prompt_for_run = prompt_path
+            with _task_runtime_signal_handlers():
+                if task["kind"] == "command":
+                    status, exit_code, result = self._run_command_task(task, stdout_path, stderr_path)
+                elif task["kind"] == "http_check":
+                    status, exit_code, result = self._run_http_check_task(task, stdout_path, stderr_path)
+                else:
+                    prompt_text = self.build_task_prompt(task)
+                    prompt_path.write_text(prompt_text, encoding="utf-8")
+                    self.storage.update_task_run_paths(run["id"], prompt_path=prompt_path)
+                    status, exit_code, result = self._run_agent_task(task, prompt_text, stdout_path, stderr_path)
+                    prompt_for_run = prompt_path
         except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
             status = "failed"
             exit_code = None
@@ -194,7 +220,255 @@ class ProjectRuntime:
             requested_by=task.get("profile"),
             run_id=run["id"],
         )
+        self.last_post_execution_request = self._enqueue_task_completion_post_execution({**task, "status": status}, run, result, stdout_path, stderr_path)
         return status
+
+    def run_post_execution(self, request: dict[str, Any], *, worker_id: str = "hwe-runner") -> dict[str, Any]:
+        if request["kind"] != "post_execution":
+            raise ProjectStorageError(f"Run request is not post_execution: {request['id']}")
+        task = self.storage.get_task(request["task_id"])
+        context = request.get("result") if isinstance(request.get("result"), dict) else {}
+        profile = str(request.get("profile") or context.get("profile") or task.get("profile") or "default")
+        prompt_text = str(context.get("prompt_text") or "")
+        if not prompt_text:
+            raise ProjectStorageError(f"Post-execution request has no prompt_text: {request['id']}")
+        run_id = f"post_{request['id']}"
+        run_dir = self.storage.engine_dir / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = run_dir / "prompt.md"
+        stdout_path = run_dir / "stdout.log"
+        stderr_path = run_dir / "stderr.log"
+        prompt_path.write_text(prompt_text, encoding="utf-8")
+        synthetic_task = {
+            **task,
+            "kind": str(context.get("kind") or "post_execution"),
+            "title": str(context.get("title") or f"PM post-execution: {task['title']}"),
+            "profile": profile,
+            "prompt_template_ref": context.get("prompt_template_ref"),
+            "prompt_text": prompt_text,
+            "skills": _string_list(context.get("skills"), default=["hwe"]),
+            "outputs": _string_list(context.get("outputs")),
+            "gates": _string_list(context.get("gates")),
+            "_event_run_id": None,
+        }
+        self.storage.event(
+            task["project_id"],
+            task["workitem_id"],
+            task["workflow_id"],
+            task["id"],
+            "task_post_execution_started",
+            {"request_id": request["id"], "worker_id": worker_id, "profile": profile, "run_id": run_id, "source_run_id": context.get("source_run_id")},
+        )
+        status, exit_code, result = self._run_agent_task(synthetic_task, prompt_text, stdout_path, stderr_path)
+        human_action_title = result.pop("_human_action_title", None)
+        human_action_body = result.pop("_human_action_body", None)
+        human_action_questions = result.pop("_human_action_questions", None)
+        human_action_evidence = result.pop("_human_action_evidence", None)
+        hermes_session_id = _hermes_session_id_from_log(stderr_path)
+        if hermes_session_id and "hermes_session_id" not in result:
+            result["hermes_session_id"] = hermes_session_id
+        if status in {"waiting_for_info", "waiting_for_approval"}:
+            kind = "info_request" if status == "waiting_for_info" else "approval_request"
+            self.storage.create_human_action(
+                task["project_id"],
+                kind=kind,
+                title=human_action_title or "PM post-execution needs input",
+                body=human_action_body or json.dumps(result, ensure_ascii=False, sort_keys=True),
+                workitem_id=task["workitem_id"],
+                workflow_id=task["workflow_id"],
+                task_id=task["id"],
+                run_id=None,
+                questions=human_action_questions,
+                evidence=human_action_evidence,
+                requested_by=profile,
+            )
+        payload = {
+            "request_id": request["id"],
+            "run_id": run_id,
+            "source_run_id": context.get("source_run_id"),
+            "status": status,
+            "exit_code": exit_code,
+            "profile": profile,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "prompt_path": str(prompt_path),
+            "result": result,
+        }
+        self.storage.event(task["project_id"], task["workitem_id"], task["workflow_id"], task["id"], "task_post_execution_finished", payload)
+        return payload
+
+    def _enqueue_task_completion_post_execution(
+        self,
+        task: dict[str, Any],
+        run: dict[str, Any],
+        result: dict[str, Any],
+        stdout_path: Path,
+        stderr_path: Path,
+    ) -> dict[str, Any] | None:
+        template = self._task_completion_template(task)
+        if template is None:
+            if task.get("status") == "failed":
+                self._enqueue_failure_recovery_post_execution(task, run, result, stdout_path, stderr_path)
+            return None
+        variables = _task_completion_variables(task, run, result, stdout_path, stderr_path, self.storage.project_root)
+        variables["hwe_control_context"] = "\n".join(self._hwe_control_context_lines())
+        post_execution = task_completion_post_execution_spec(template, variables)
+        profile = str(post_execution.get("profile") or "")
+        prompt_template_ref = str(post_execution.get("prompt_template_ref") or "")
+        if not profile or not prompt_template_ref:
+            self.storage.event(
+                task["project_id"],
+                task["workitem_id"],
+                task["workflow_id"],
+                task["id"],
+                "task_post_execution_skipped",
+                {"reason": "missing_profile_or_prompt_template", "workflow_template_id": template["id"]},
+                run_id=run["id"],
+            )
+            return None
+        context = {
+            "workflow_template_id": template["id"],
+            "source_run_id": run["id"],
+            "source_status": task.get("status"),
+            "profile": profile,
+            "title": str(post_execution.get("title") or f"PM post-execution: {task['title']}"),
+            "kind": str(post_execution.get("kind") or "post_execution"),
+            "prompt_template_ref": prompt_template_ref,
+            "prompt_text": render_task_completion_prompt(template, variables),
+            "skills": _string_list(post_execution.get("skills"), default=["hwe"]),
+            "outputs": _string_list(post_execution.get("outputs")),
+            "gates": _string_list(post_execution.get("gates")),
+        }
+        request = self.storage.enqueue_run_request(
+            task["project_id"],
+            task["workitem_id"],
+            kind="post_execution",
+            task_id=task["id"],
+            requested_worker_id="hwe-runtime",
+            profile=profile,
+            max_tasks=1,
+            dry_run=self.dry_run,
+            context=context,
+        )
+        self.storage.event(
+            task["project_id"],
+            task["workitem_id"],
+            task["workflow_id"],
+            task["id"],
+            "task_post_execution_queued",
+            {"request_id": request["id"], "source_run_id": run["id"], "workflow_template_id": template["id"], "profile": profile},
+            run_id=run["id"],
+        )
+        return request
+
+    def _task_completion_template(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            templates = [resolve_workflow_template(template) for template in list_workflow_templates(self.config, project_root=self.storage.project_root)]
+        except WorkflowTemplateError as exc:
+            self.storage.event(task["project_id"], task["workitem_id"], task["workflow_id"], task["id"], "task_post_execution_skipped", {"reason": str(exc)})
+            return None
+        preferred_ids = _preferred_template_ids(task)
+        ordered = sorted(templates, key=lambda template: preferred_ids.index(template["id"]) if template["id"] in preferred_ids else len(preferred_ids))
+        for template in ordered:
+            try:
+                if workflow_task_completion_action(template, task):
+                    return template
+            except WorkflowTemplateError:
+                continue
+        return None
+
+    def _enqueue_failure_recovery_post_execution(
+        self,
+        task: dict[str, Any],
+        run: dict[str, Any],
+        result: dict[str, Any],
+        stdout_path: Path,
+        stderr_path: Path,
+    ) -> dict[str, Any] | None:
+        template = self._failure_recovery_template(task)
+        if template is None:
+            return None
+        for request in self.storage.list_run_requests(project_id=task["project_id"], workitem_id=task["workitem_id"], limit=200):
+            request_result = request.get("result") if isinstance(request.get("result"), dict) else {}
+            if request.get("kind") == "post_execution" and request.get("task_id") == task["id"] and request_result.get("source_run_id") == run["id"]:
+                return request
+        variables = {
+            "project_root": str(self.storage.project_root),
+            "project_id": task["project_id"],
+            "workitem_id": task["workitem_id"],
+            "workflow_id": task["workflow_id"],
+            "failed_task_id": task["id"],
+            "failed_task_title": task["title"],
+            "failed_task_kind": task["kind"],
+            "failed_task_profile": task.get("profile") or "default",
+            "failed_run_id": run["id"],
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "result_json": json.dumps({"run_id": run["id"], **result}, ensure_ascii=False, sort_keys=True),
+            "hwe_control_context": "\n".join(self._hwe_control_context_lines()),
+        }
+        task_spec = failure_recovery_task_spec(template, variables)
+        profile = str(task_spec.get("profile") or "")
+        prompt_template_ref = str(task_spec.get("prompt_template_ref") or "")
+        if not profile or not prompt_template_ref:
+            self.storage.event(
+                task["project_id"],
+                task["workitem_id"],
+                task["workflow_id"],
+                task["id"],
+                "failure_recovery_skipped",
+                {"reason": "missing_profile_or_prompt_template", "workflow_template_id": template["id"]},
+            )
+            return None
+        run_request = self.storage.enqueue_run_request(
+            task["project_id"],
+            task["workitem_id"],
+            kind="post_execution",
+            task_id=task["id"],
+            requested_worker_id="hwe-runtime",
+            profile=profile,
+            max_tasks=1,
+            dry_run=self.dry_run,
+            context={
+                "workflow_template_id": template["id"],
+                "source_run_id": run["id"],
+                "source_status": task.get("status"),
+                "profile": profile,
+                "title": str(task_spec.get("title") or f"PM Recovery: {task['title']}"),
+                "kind": str(task_spec.get("kind") or "post_execution"),
+                "prompt_template_ref": prompt_template_ref,
+                "prompt_text": render_failure_recovery_prompt(template, variables),
+                "skills": _string_list(task_spec.get("skills"), default=["hwe"]),
+                "outputs": _string_list(task_spec.get("outputs")),
+                "gates": _string_list(task_spec.get("gates")),
+            },
+        )
+        self.storage.event(
+            task["project_id"],
+            task["workitem_id"],
+            task["workflow_id"],
+            task["id"],
+            "task_post_execution_queued",
+            {"failed_task_id": task["id"], "failed_run_id": run["id"], "workflow_template_id": template["id"], "profile": profile, "run_request_id": run_request["id"]},
+            run_id=run["id"],
+        )
+        return run_request
+
+    def _failure_recovery_template(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            templates = [resolve_workflow_template(template) for template in list_workflow_templates(self.config, project_root=self.storage.project_root)]
+        except WorkflowTemplateError as exc:
+            self.storage.event(task["project_id"], task["workitem_id"], task["workflow_id"], task["id"], "failure_recovery_skipped", {"reason": str(exc)})
+            return None
+        preferred_ids = _preferred_template_ids(task)
+        ordered = sorted(templates, key=lambda template: preferred_ids.index(template["id"]) if template["id"] in preferred_ids else len(preferred_ids))
+        for template in ordered:
+            try:
+                if workflow_failure_recovery_action(template, task):
+                    return template
+            except WorkflowTemplateError:
+                continue
+        return None
 
     def _run_command_task(self, task: dict[str, Any], stdout_path: Path, stderr_path: Path) -> tuple[str, int | None, dict[str, Any]]:
         command = (task.get("prompt_text") or "").strip()
@@ -383,12 +657,14 @@ class ProjectRuntime:
                     process_group_id = os.getpgid(process.pid)
                 except OSError:
                     process_group_id = None
-            process_payload = {"run_id": stdout_path.parent.name, "pid": process.pid, "pgid": process_group_id, "profile": profile_name}
+            process_run_id = stdout_path.parent.name
+            event_run_id = task.get("_event_run_id", process_run_id)
+            process_payload = {"run_id": process_run_id, "pid": process.pid, "pgid": process_group_id, "profile": profile_name}
             stdout.write(f"Hermes process started pid={process.pid} pgid={process_group_id}\n")
             stderr.write(f"Hermes process started pid={process.pid} pgid={process_group_id}\n")
             stdout.flush()
             stderr.flush()
-            self.storage.event(task["project_id"], task["workitem_id"], task["workflow_id"], task["id"], "task_process_started", process_payload, run_id=stdout_path.parent.name)
+            self.storage.event(task["project_id"], task["workitem_id"], task["workflow_id"], task["id"], "task_process_started", process_payload, run_id=event_run_id)
             try:
                 return_code = process.wait(timeout=int(profile_config.get("timeout_seconds", 3600)))
             except subprocess.TimeoutExpired:
@@ -628,6 +904,73 @@ class ProjectRuntime:
         return exit_code in allowed
 
 
+def _preferred_template_ids(task: dict[str, Any]) -> list[str]:
+    preferred: list[str] = []
+    created_reason = str(task.get("created_reason") or "")
+    match = re.match(r"workflow-template:([^:]+):stage:", created_reason)
+    if match:
+        preferred.append(match.group(1))
+    preferred.append(DEFAULT_WORKFLOW_TEMPLATE_ID)
+    unique: list[str] = []
+    for template_id in preferred:
+        if template_id and template_id not in unique:
+            unique.append(template_id)
+    return unique
+
+
+def _pending_human_action_count(storage: ProjectStorage, project_id: str, workitem_id: str, workflow_id: str) -> int:
+    return sum(
+        1
+        for action in storage.list_human_actions(project_id, status="pending")
+        if action.get("workitem_id") == workitem_id or action.get("workflow_id") == workflow_id
+    )
+
+
+def _task_completion_variables(
+    task: dict[str, Any],
+    run: dict[str, Any],
+    result: dict[str, Any],
+    stdout_path: Path,
+    stderr_path: Path,
+    project_root: Path,
+) -> dict[str, str]:
+    result_json = json.dumps({"run_id": run["id"], **result}, ensure_ascii=False, sort_keys=True)
+    variables = {
+        "project_root": str(project_root),
+        "project_id": str(task["project_id"]),
+        "workitem_id": str(task["workitem_id"]),
+        "workflow_id": str(task["workflow_id"]),
+        "source_task_id": str(task["id"]),
+        "source_task_title": str(task["title"]),
+        "source_task_kind": str(task["kind"]),
+        "source_task_profile": str(task.get("profile") or "default"),
+        "source_task_status": str(task.get("status") or "unknown"),
+        "source_run_id": str(run["id"]),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "result_json": result_json,
+    }
+    if task.get("status") == "failed":
+        variables.update(
+            {
+                "failed_task_id": variables["source_task_id"],
+                "failed_task_title": variables["source_task_title"],
+                "failed_task_kind": variables["source_task_kind"],
+                "failed_task_profile": variables["source_task_profile"],
+                "failed_run_id": variables["source_run_id"],
+            }
+        )
+    return variables
+
+
+def _string_list(value: Any, *, default: list[str] | None = None) -> list[str]:
+    if value is None:
+        return list(default or [])
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
 def _config_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -708,6 +1051,45 @@ def _stdout_has_clarify_timeout(stdout_path: Path) -> bool:
     except OSError:
         return False
     return "clarify timed out" in stdout_text.lower()
+
+
+@contextmanager
+def _task_runtime_signal_handlers():
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous_handlers: dict[int, Any] = {}
+
+    def handle_signal(signum: int, frame: Any) -> None:
+        _ = frame
+        raise RuntimeSignalInterrupt(f"Received {_signal_name(signum)}")
+
+    for signal_name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, signal_name, None)
+        if signum is None:
+            continue
+        try:
+            previous_handlers[int(signum)] = signal.getsignal(signum)
+            signal.signal(signum, handle_signal)
+        except (OSError, RuntimeError, ValueError):
+            previous_handlers.pop(int(signum), None)
+
+    try:
+        yield
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            try:
+                signal.signal(signum, previous_handler)
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
 
 
 def _hermes_session_id_from_log(stderr_path: Path) -> str | None:

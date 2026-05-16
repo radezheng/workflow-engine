@@ -14,11 +14,11 @@
 
 构建任务图时减少 worker 的歧义：
 
-- 需求、架构、数据流或验收不清楚时，创建 designer/research/human-action 任务。
+- 需求、架构、数据流或验收不清楚时，创建 designer/research 任务；如果必须由用户决定，创建 human action 后停止，不要继续创建或运行依赖未回答决策的任务。
 - coder 任务只用于聚焦的实现或修复切片。
 - reviewer 任务用于 implementation review、QA review、acceptance evidence。
 - qa template 可用于测试计划、回归检查和验收证据；实际 profile 按配置选择，通常可路由到 reviewer。
-- command 和 http_check 用于 deterministic verification、build/test/runtime smoke。
+- command 和 http_check 用于 deterministic verification、build/test/runtime smoke。`kind=command` 的 `prompt_text` 必须是可直接由 shell 执行的非交互命令，例如 `npm test` 或 `python -m pytest`，绝不能是自然语言任务描述、PM/controller 指令或“run the controller logic”。
 
 每个要创建的任务都应明确：
 
@@ -33,7 +33,7 @@
 
 标出必须等待 human action 的任务。保持任务图足够小，失败后容易 retry、fix 或 supersede。
 
-不要使用 Hermes 的交互式 clarify 流程。Headless HWE runner 无法回答实时 clarify；如果发现必须由用户确认的问题，请通过 `hwe human-action create` 创建真正的 HWE human action，或创建一个明确的 designer 研究任务来收集证据，并继续创建可以安全推进的任务图。不要用 `hwe task create --kind human-action` 伪造人工输入任务。
+不要使用 Hermes 的交互式 clarify 流程。Headless HWE runner 无法回答实时 clarify；如果发现必须由用户确认的问题，请通过 `hwe human-action create` 创建真正的 HWE human action，然后停止，不要同时创建依赖该答案的后续任务。只有与该答案无关、可以安全推进的任务才可继续创建。不要用 `hwe task create --kind human-action` 伪造人工输入任务。
 
 通过 HWE CLI/API 创建结果任务，不要只描述。使用 prompt 中 HWE 控制面给出的 repo/config/CLI 命令，先用 `hwe config show` 或 prompt 中列出的 profile 清单确认真实 profile；只给真实存在的 profile 分配任务。使用 `hwe task create` 时尽量显式设置 `--depends-on`、`--profile`、`--kind`、`--prompt-template-ref` 或 `--prompt-text`、`--gate`，并用真实 task id 作为依赖。不要删除或重写源 planning/design task；它们是证据。
 

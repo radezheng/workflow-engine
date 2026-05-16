@@ -32,6 +32,7 @@ Important design rules:
 - A workflow is the current execution strategy for one workitem.
 - A task is the worker-facing unit of execution.
 - Designer profile owns PM clarification, planning, and technical design.
+- PM profile owns task post-execution decisions, choosing continue/wait/retry/fix/replace/redesign, and proposing workflow-template improvements that prevent repeated coordination gaps or failures. Built-in templates default `pm_profile` to `designer` unless configured otherwise.
 - Reviewer profile owns implementation review, QA review, test evidence, and acceptance.
 - Coder profile writes code and fixes only focused slices.
 - Command and `http_check` tasks are deterministic verification surfaces.
@@ -41,9 +42,10 @@ Important design rules:
 
 ## Main Files
 
-- `src/hermes_workflow_engine/cli.py`: CLI wiring. Static commands are `validate`, `run`, `status`, `events`. Project commands include `project`, `workitem`, `workflow`, `task`, `human-action`, `answer`, `approve`, `reject`, and `run-workitem`.
-- `src/hermes_workflow_engine/project_storage.py`: Project/workitem/workflow/task persistence and state transitions. This is where task readiness, claims, retry/release, terminal statuses, human actions, and events live.
-- `src/hermes_workflow_engine/project_runtime.py`: Push-style project runner. Claims ready tasks, builds prompts, runs command/http_check/agent tasks, performs profile preflight, writes run logs, completes tasks, and returns run summaries.
+- `src/hermes_workflow_engine/cli.py`: CLI wiring. Static commands are `validate`, `run`, `status`, `events`. Project commands include `project`, `workitem`, `workflow`, `task`, `human-action`, `answer`, `approve`, `reject`, `run-workitem`, and `worker`.
+- `src/hermes_workflow_engine/project_storage.py`: Project/workitem/workflow/task persistence and state transitions. This is where run requests, task readiness, claims, retry/release, terminal statuses, human actions, and events live.
+- `src/hermes_workflow_engine/project_runtime.py`: Task execution runtime. Claims already-selected ready tasks, builds prompts, runs command/http_check/agent tasks, performs profile preflight, writes run logs, completes tasks, and returns run summaries.
+- `src/hermes_workflow_engine/project_worker.py`: Long-running project worker. Claims queued run requests from storage and invokes `ProjectRuntime`; this is the execution plane for API/UI/CLI run requests.
 - `src/hermes_workflow_engine/config.py`: HWE-local config discovery and parsing. Owns `default_workspace_root`, `prompt_template_root`, per-profile config, and UI AI provider config.
 - `src/hermes_workflow_engine/ai.py`: OpenAI-compatible provider adapter for UI AI-assisted form drafting. Keep provider secrets out of responses and tests local.
 - `src/hermes_workflow_engine/spec.py`: Static YAML workflow spec parsing.
@@ -79,7 +81,7 @@ Storage and CLI currently support:
 - Task statuses: `pending`, `ready`, `running`, `waiting_for_info`, `waiting_for_approval`, `succeeded`, `failed`, `cancelled`, `skipped`, `superseded`.
 - Terminal dependency-satisfying statuses: `succeeded`, `skipped`, `superseded`.
 - Human actions: information requests and approval requests, resolved through `answer`, `approve`, and `reject`.
-- Standalone human actions can be created with `hwe human-action create`; do not represent operator input as fake `kind=human-action` tasks. A pending human action attached to a workitem or its current workflow blocks the workitem as `waiting_for_human`; resolving a standalone action records the decision but does not itself create follow-up work, so the requesting worker must create or run a concrete continuation task when the answer unlocks more work.
+- Standalone human actions can be created with `hwe human-action create`; do not represent operator input as fake `kind=human-action` tasks. A pending human action attached to a workitem or its current workflow blocks the workitem as `waiting_for_human` and prevents claiming ready tasks for that workitem; resolving a standalone action records the decision but does not itself create follow-up work, so the requesting worker must create or run a concrete continuation task when the answer unlocks more work.
 - File-backed prompt templates: tasks reference `role/name`; runtime loads `.engine/prompt-templates/<role>/<name>.md` first, then `prompt_template_root/<role>/<name>.md`.
 - Hermes workers using the HWE skill must discover projects through configured HWE state (`HWE_CONFIG`, API, or `ProjectStorage`), not by scanning only for `.engine/` directories. With PostgreSQL backend, the authoritative project/workitem/task state is not the project-local SQLite file.
 - Hermes workers should not assume machine-specific paths, ports, model names, workspace roots, or database service names from the HWE skill. Resolve them from `HWE_REPO`, `HWE_CONFIG`, the active `hwe.config.yaml`, command-line arguments, or the current repository. If repo/config/environment discovery disagrees with expectations, run `hwe doctor` before mutating workflow state.
@@ -87,7 +89,8 @@ Storage and CLI currently support:
 - Hermes workers should verify that any target profile has every required skill before assigning a task to it, including the `hwe` skill when the worker must inspect or mutate HWE state. If a profile is missing a required skill, copy the full skill directory into that profile's configured skill directory and re-check discovery before running the task; do not launch work that depends on an unavailable skill.
 - Hermes workers should inspect existing project/public prompt templates before setting `prompt_template_ref`; choose refs from `.engine/prompt-templates/<role>/<name>.md` or `prompt_template_root/<role>/<name>.md`, and fall back to explicit prompt text when no suitable template exists.
 - Workflow shape belongs in workflow template YAML, not in the HWE skill, API/UI hardcoding, or coordinator prose. If a requested delivery flow is missing, create or edit a workflow template first; then have the UI/API follow the selected template's parameters, prompt-template refs, gates, materialization source rules, and child workflow references. The default profile can coordinate the whole workflow, but task records should not claim `designer`/`coder`/`reviewer` ownership unless HWE will actually route those profiles and their skills/templates are verified; use template parameters to adapt to `default` when needed. Do not manually transcribe planner/designer stdout into tasks during normal flow; use the template materialization task only after the template source rules and gates are satisfied.
-- `run-workitem` push-style execution for one or more ready tasks.
+- Durable `run_requests`: API/UI/CLI enqueue workitem or task run requests; `hwe worker` claims and executes them. `run-workitem --local` is a recovery/test path that bypasses HTTP but still enqueues a request.
+- `hwe worker` long-running execution for queued requests, with `--once` for tests and maintenance.
 - `hwe serve` starts the local FastAPI API for the UI console.
 - UI AI assist for project, workitem, and human-action inputs via configured `ai_providers`; workitem drafting includes compact context from the selected project's existing workitems, workflows, and task status summaries.
 - UI plan breakdown visibility must come from API-reported workflow-template actions, not hardcoded task kind or prompt-template strings. Materialization creates a follow-up task rendered from the selected workflow template and the template-selected source evidence. HWE should not parse natural-language plan output into tasks in Python/TypeScript.
@@ -99,6 +102,7 @@ When starting the local console, run the API from the workflow-engine repository
 ```bash
 cd /Users/rade/workspace/hermes/workflow-engine
 HWE_CONFIG=$PWD/hwe.config.yaml .venv/bin/hwe serve --host 127.0.0.1 --port 8711
+HWE_CONFIG=$PWD/hwe.config.yaml .venv/bin/hwe worker
 npm --prefix ui run dev -- --host 127.0.0.1 --port 5173
 ```
 
@@ -120,7 +124,7 @@ Runtime task kinds:
 Human-input and auto-run rules:
 
 - If requirements, acceptance criteria, ownership, external-service permissions, destructive operations, credentials, ports, data retention, or product behavior are unclear, create a focused `waiting_for_info`/`waiting_for_approval` human action or a standalone `hwe human-action create` request instead of guessing. Do not create fake `kind=human-action` tasks.
-- HWE auto-run is safe only for an already clear ready queue with explicit dependencies and deterministic stop conditions. After task breakdown creates a concrete queue, it is reasonable to try Run Next with Auto. CLI `run-workitem` without `--max-tasks` runs until no ready task, failure, or waiting-for-human; UI Auto repeatedly runs one task at a time and stops on no-ready, failure, or waiting-for-human. If uncertainty appears while auto-running, stop and ask the user or create a focused HWE human action before continuing.
+- HWE auto-run is safe only for an already clear ready queue with explicit dependencies and deterministic stop conditions. After task breakdown creates a concrete queue, it is reasonable to try Run Next with Auto. UI/CLI enqueue one or more durable run requests; `hwe worker` performs execution and stops each request on no ready task, failure, or waiting-for-human. If uncertainty appears while auto-running, stop and ask the user or create a focused HWE human action before continuing.
 - Do not auto-run through ambiguity, missing approvals, destructive operations, external infrastructure mutation, or broad unreviewed implementation tasks.
 
 Agent task flow:
@@ -181,14 +185,15 @@ AI provider config is for UI drafting and should use OpenAI-compatible chat comp
 ## Dogfood Lessons To Preserve
 
 - Static reviewer QA missed actual runtime failures. Final acceptance for runnable apps should include deterministic runtime smoke tasks, ideally `kind=http_check`, plus real backend/frontend startup commands.
+- Completed tasks automatically queue a workflow-template-defined `post_execution` run request when the template provides `task_completion`. This is not a PM task record; it is the completed task's controller hook. PM prompts include HWE CLI/control context. After a successful PM post-execution for a successful/skipped/superseded source task, the worker enqueues a one-step workitem continuation when ready tasks exist and no queued workitem/task request already exists. Failed `command` and `http_check` tasks are workflow gate failures. Inspect logs and task definitions first; replace a wrong verification command and mark the obsolete gate `superseded` only after replacement evidence succeeds, or create a focused fix task when the gate exposes a real product bug. PM post-execution must propose workflow-template/prompt improvements when the outcome reveals a repeatable process gap. Long-term recovery shape belongs in workflow templates, not blind task retries or operator prose.
 - Qwen coder can return `-6` after useful completion. Use profile `success_exit_codes` rather than treating every non-zero shutdown as failure.
 - LM Studio may return transient 400 or time out immediately after switching models. Healthcheck retry exists for this reason; tune `healthcheck.retries`, `healthcheck.retry_delay_seconds`, and `healthcheck.timeout_seconds`. HWE writes healthcheck attempts to the task run `stderr.log`, so an old `started` run with empty stderr and no runner process is likely abandoned rather than still retrying.
 - Profile `switch_commands` are best-effort by default and run independently, so an unload failure does not prevent the following load command. HWE logs failures as warnings and continues to the next switch step, then healthcheck/agent invocation. Use `switch_command_required: true` or per-step `required: true` only when a failed switch must block execution. Legacy single-string `switch_command` still works for one-step switches.
-- Hermes hook and dangerous-command approval prompts are not HWE human actions. For trusted local profiles set `hooks_auto_accept: true` in the Hermes profile config or use `hermes_args: [--accept-hooks]`; do not use `--yolo` for routine HWE runs. HWE closes agent stdin so unexpected interactive prompts fail or receive EOF instead of hanging until timeout.
+- Hermes hook and dangerous-command approval prompts are not HWE human actions. For trusted local profiles set `hooks_auto_accept: true` in the Hermes profile config or use `hermes_args: [--accept-hooks]`; do not use `--yolo` for routine HWE runs. `--accept-hooks` does not approve dangerous-command prompts. If a trusted profile needs a narrower command exception, configure Hermes `command_allowlist` in the actual profile home used by HWE. Discover that home from the active Hermes installation, for example with `hermes profile show <profile>`, profile alias configuration, or the `HERMES_HOME` used when invoking the profile; do not assume the default Hermes config applies to isolated profiles. HWE closes agent stdin so unexpected interactive prompts fail or receive EOF instead of hanging until timeout.
 - Hermes clarify timeouts are different from hook prompts. When Hermes logs `clarify timed out` and then the agent process times out, HWE should preserve run evidence in `clarification.md`, move the task to `waiting_for_info`, and create a pending human action; if Hermes did not emit the exact question, say that explicitly.
 - `task_run_started` events include the `run_id`; run stdout/stderr/prompt paths should be registered at run start so the UI/API can inspect active runs. When Hermes emits a `session_id`, store it on the run result and expose exact local session JSONL events through the run Timeline API/UI when the session log exists.
-- Push-style runner can be interrupted. A `running` task is not automatically stuck; inspect events, active task runs, logs, and known runner processes first. Use `hwe task release <project> <task-id> --reason abandoned-run` only after confirming the runner is gone or abandoned. Release marks any still-started task runs for that task as `cancelled` with the release reason. Do not run unmonitored background retry loops that repeatedly release and rerun the same task.
-- If HWE catches an interactive runner interrupt, it should mark the active run and task `cancelled`. A hard-killed API/runner process may still leave `started`/`running` state; inspect evidence, then release manually.
+- Worker execution can be interrupted. A `running` task is not automatically stuck; inspect run requests, events, active task runs, logs, and known worker processes first. Use `hwe task release <project> <task-id> --reason abandoned-run` only after confirming the worker is gone or abandoned. Release marks any still-started task runs for that task as `cancelled` with the release reason. Do not run unmonitored background retry loops that repeatedly release and rerun the same task.
+- If HWE catches a worker interrupt, it should mark the active run and task `cancelled`. API server restarts should not kill in-flight tasks because execution belongs to `hwe worker`. A hard-killed worker process may still leave `started`/`running` state; inspect evidence, then release manually.
 - Use `hwe task reassign <project> <task-id> --profile <profile>` to change profile on a `pending` or `ready` task while preserving prior run history; release abandoned `running` tasks first.
 - Use `hwe task retry` for transient failures while preserving run history.
 - Use `superseded` for duplicate or obsolete tasks that were replaced by successful tasks, so summaries stay meaningful without deleting history.
@@ -246,6 +251,7 @@ Use these from the repo root:
 .venv/bin/pytest
 .venv/bin/hwe config show
 .venv/bin/hwe task list <project> <workflow-id>
+.venv/bin/hwe worker --once --max-requests 1
 .venv/bin/hwe run-workitem <project> <workitem-id> --project-id <project-id> --max-tasks 1
 cd ui && npm run build
 ```

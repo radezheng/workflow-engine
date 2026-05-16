@@ -3,6 +3,8 @@ name: QA Review
 description: Nested workflow for verification, regression review, runtime smoke, and acceptance evidence.
 version: 1
 parameters:
+  pm_profile:
+    default: designer
   reviewer_profile:
     default: reviewer
   qa_prompt_template:
@@ -11,12 +13,16 @@ parameters:
     default: reviewer/runtime-smoke
   planning_review_prompt_template:
     default: reviewer/planning-review
+  recovery_prompt_template:
+    default: pm/recovery-plan
 profiles:
+  pm: ${pm_profile}
   reviewer: ${reviewer_profile}
 prompt_templates:
   regression_review: ${qa_prompt_template}
   runtime_smoke: ${smoke_prompt_template}
   planning_review: ${planning_review_prompt_template}
+  recovery_plan: ${recovery_prompt_template}
 planning_task:
   stage: qa-plan
   title: 规划 QA 验证
@@ -62,3 +68,36 @@ materialize:
     QA plan review stdout 路径：${review_stdout_path}
 
     不要猜测缺失验收标准；信息不足时请求 human action。
+task_completion:
+  sources:
+    - statuses: [succeeded, failed, cancelled, skipped, superseded, waiting_for_info, waiting_for_approval]
+  post_execution:
+    stage: qa-pm-task-completion-decision
+    title: "PM Decision: ${source_task_title}"
+    kind: post_execution
+    profile: ${pm_profile}
+    prompt_template_ref: ${recovery_prompt_template}
+    outputs: [QA 推进决策, 后续验证或修复任务, workflow template 改进建议]
+    gates: [已检查 source run 证据, 已选择继续/等待/retry/fix/replace/redesign, 已提出必要建议]
+    skills: [hwe]
+  input_prompt: |
+    一个 QA workflow task 已完成。读取 source run 证据和当前任务图，决定是继续 QA、等待人工输入、retry、替换验证 task、创建 fix task，还是重新规划 QA。
+
+    项目根目录：${project_root}
+    Project id：${project_id}
+    Workitem id：${workitem_id}
+    Workflow id：${workflow_id}
+    Source task id：${source_task_id}
+    Source task 标题：${source_task_title}
+    Source task kind/profile/status：${source_task_kind} / ${source_task_profile} / ${source_task_status}
+    Source run id：${source_run_id}
+    stdout 路径：${stdout_path}
+    stderr 路径：${stderr_path}
+    result JSON：${result_json}
+
+    HWE 控制面：
+    ${hwe_control_context}
+
+    保留历史，必要时用 replacement task + `superseded`，或创建聚焦 fix/design task。replacement 必须修正失败根因；如果 replacement 是 `kind=command`，`prompt_text` 必须是可直接执行的 shell 命令。不要把人工输入伪装成 task。如果下一步依赖用户回答，创建 human action 后必须停止，不要同时创建或运行依赖未回答决策的任务。
+    如果决定继续，必须实际执行 HWE CLI 排队下一步 run request；不要只在输出里说“will request”。
+    如果当前 QA workflow template 或 prompt 应该改进以避免同类问题或提升推进质量，请输出具体建议和原因。

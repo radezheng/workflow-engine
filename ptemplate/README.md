@@ -37,10 +37,11 @@ Worker role templates:
 - `reviewer/runtime-smoke.md`: runtime smoke review for runnable applications.
 - `qa/test-plan.md`: design deterministic test and smoke coverage.
 - `qa/regression-review.md`: check for behavior regressions around touched surfaces.
+- `pm/recovery-plan.md`: decide task post-execution workflow progress, recover failed tasks, and propose workflow-template improvements when outcomes reveal repeatable process gaps.
 - `researcher/source-research.md`: 用中文做已有项目的只读源码/文档研究，为 technical design 和任务拆分提供事实依据。
 - `operator/recovery-plan.md`: plan task release, retry, skip, or supersede recovery.
 
-The historical `planner/` templates remain compatible for existing projects, but new PM, planning, and design tasks should use the `designer` profile. The `reviewer` profile should stay focused on implementation review, QA review, and acceptance evidence.
+The historical `planner/` templates remain compatible for existing projects, but new planning and design tasks should use the `designer` profile. Task post-execution control uses the template-selected `pm_profile`, which defaults to `designer` unless configured separately. The `reviewer` profile should stay focused on implementation review, QA review, and acceptance evidence.
 
 Example task reference:
 

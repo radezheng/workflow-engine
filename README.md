@@ -148,10 +148,12 @@ profiles:
       timeout_seconds: 30
 ```
 
-`run-workitem` runs `switch_commands` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
+`hwe worker` consumes queued run requests and runs `switch_commands` and `healthcheck` before invoking an agent task. Keep machine-specific model switching here, not in skills or generated project files.
     Healthcheck retries are meant to absorb slow model switching and server warmup. HWE logs each healthcheck attempt to the task run `stderr.log`; tune `retries`, `retry_delay_seconds`, and `timeout_seconds` for local model load time.
 Use `switch_commands` for multi-step model changes such as unload/load; HWE runs each command independently, logs non-zero exits as warnings by default, and continues to the next switch step. The legacy `switch_command` string still works for single commands. Set `switch_command_required: true` on a profile, or `required: true` on a `switch_commands` mapping entry, when a failed switch must block the agent run.
-Hermes hook prompts and dangerous-command approval prompts are handled by Hermes, not by HWE human actions. For trusted local profiles, set `hooks_auto_accept: true` in the Hermes profile config or configure `hermes_args: [--accept-hooks]` so hook prompts do not block headless runs. Do not use `--yolo` for routine HWE runs; dangerous-command prompts should fail or receive EOF instead of being broadly bypassed.
+Hermes hook prompts and dangerous-command approval prompts are handled by Hermes, not by HWE human actions. For trusted local profiles, set `hooks_auto_accept: true` in the Hermes profile config or configure `hermes_args: [--accept-hooks]` so hook prompts do not block headless runs. `--accept-hooks` does not approve dangerous shell commands; only `--yolo` bypasses those prompts, and HWE should not use it for routine runs. Agent prompts should steer workers toward non-interactive verification commands, especially avoiding pipe-to-interpreter patterns such as `curl | python`.
+
+If a trusted profile needs a narrower dangerous-command exception, configure Hermes `command_allowlist` in the actual profile home used by HWE. Discover that home from the active Hermes installation, for example with `hermes profile show <profile>`, profile alias configuration, or the `HERMES_HOME` used when invoking the profile. Adding the allowlist only to the default Hermes config may not affect isolated profiles.
 If Hermes enters its clarify flow during a headless run and only emits a `clarify timed out` marker before the task timeout, HWE treats that as missing operator input instead of an ordinary failure. It writes `.engine/runs/<run-id>/clarification.md`, marks the task `waiting_for_info`, and creates a human action with links to `prompt.md`, `stdout.log`, `stderr.log`, and the clarification note. The exact question can only appear there if Hermes emitted it to its logs.
 
 The local UI can use AI-assisted form drafting for project, workitem, and human-action inputs. Configure one or more OpenAI-compatible providers under `ai_providers`:
@@ -235,6 +237,7 @@ hwe run workflow.yaml [--dry-run] [--max-steps N]
 hwe status workflow.yaml
 hwe events workflow.yaml [--limit N]
 hwe serve [--host 127.0.0.1] [--port 8711] [--reload]
+hwe worker [project] [--once] [--max-requests N] [--profile PROFILE]
 ```
 
 ## Project/WorkItem/Task Queue
@@ -273,28 +276,36 @@ hwe human-action create my-project "Confirm credit-cycle indicators" \
   --requested-by designer
 ```
 
-A pending human action attached to a workitem or its current workflow keeps the workitem in `waiting_for_human`, even when every task row is otherwise terminal. Answering or approving a task-linked human action moves that waiting task back to `ready`, so the next `hwe run-workitem` can rerun the task with the recorded response in context. Standalone human actions are for planning/materialization decisions that are not owned by one waiting task; after resolving one, the worker that requested it must create or run the continuation task that consumes the answer.
+A pending human action attached to a workitem or its current workflow keeps the workitem in `waiting_for_human`, even when every task row is otherwise terminal. Answering or approving a task-linked human action moves that waiting task back to `ready`, so the next queued run request can rerun the task with the recorded response in context. Standalone human actions are for planning/materialization decisions that are not owned by one waiting task; after resolving one, the worker that requested it must create or run the continuation task that consumes the answer.
 
 Archiving is a soft project-level state change. It keeps the project folder and workflow history intact, records project events, and hides the project from the default API/UI project list until it is restored or listed with archived projects included.
 
-To run the ready task queue directly from the CLI, use `run-workitem`. This is the push-style runner that API and UI layers can build on later:
+Run execution is split into a durable control plane and a long-running worker. UI, API, and the default CLI path enqueue rows in `run_requests`; `hwe worker` claims those requests and runs `ProjectRuntime` against the ready task queue. This keeps API requests short-lived and makes execution observable even when the UI disconnects.
 
 ```bash
-hwe run-workitem my-project "$WORKITEM_ID" --dry-run --max-tasks 1
+hwe serve --host 127.0.0.1 --port 8711
+hwe worker
+hwe run-workitem my-project "$WORKITEM_ID" --max-tasks 1
 ```
+
+`hwe run-workitem` defaults to POSTing to the local API (`HWE_API_URL` or `http://127.0.0.1:8711`) and returns the queued run request. Use `--local` only for recovery or tests when the API is unavailable; it bypasses HTTP but still enqueues a `run_requests` row for a worker to consume.
 
 For `kind=command` tasks, `--prompt-text` is treated as the shell command and runs from the project root. For `kind=http_check` tasks, `--prompt-text` is either a URL or a JSON smoke-test spec that HWE runs with retries. For agent tasks, HWE combines the role prompt template, task prompt, HWE control context, work item context, declared skills, outputs, and gates into `.engine/runs/<run-id>/prompt.md`, then invokes the task profile through Hermes. The control context includes the HWE repo, explicit config path, CLI command, project/workitem/workflow/task ids, and configured profile list so workers do not invent unavailable profiles or guess local commands. `task_run_started` events include the `run_id`, and started runs register stdout/stderr/prompt paths as soon as those files are created so the UI/API can read logs while a task is still running. Run logs include an HWE header with kind, cwd, profile when applicable, the executed command, child process console output, and exit code; agent commands log the `prompt.md` path instead of inlining the full prompt. When Hermes emits a `session_id`, HWE stores it in the run result and `/api/projects/<project>/runs/<run-id>/timeline` reads the matching local Hermes session JSONL when present, exposing visible user/assistant/tool events for debugging. `--dry-run` writes prompts and logs without invoking Hermes or running shell commands.
 
-When a planning/design task succeeds, the next step is decided by the selected workflow template, not by hardcoded task names. The built-in `software-project-dev` template defines the default designer planning task, reviewer gate, materialization sources, breakdown task, profile parameters, prompt template refs, and child workflow references for QA and publish flows. HWE does not parse natural-language plan output itself, and the default coordinator should not manually transcribe designer stdout into implementation tasks during normal flow. Instead, the UI/API create template-defined review tasks after planning; only a succeeded review source exposes the materialization action. The materialization task receives the reviewed plan/design `stdout.log` path plus the review evidence path and creates the task graph through HWE commands. HWE-generated task prompt wrappers are written in Chinese; user-provided requirements and constraints keep their original language.
+When a planning/design task succeeds, the next step is decided by the selected workflow template, not by hardcoded task names. The built-in `software-project-dev` template defines the default PM controller profile, designer planning task, reviewer gate, materialization sources, breakdown task, profile parameters, prompt template refs, task post-execution controller hook, and child workflow references for QA and publish flows. HWE does not parse natural-language plan output itself, and the default coordinator should not manually transcribe designer stdout into implementation tasks during normal flow. Instead, the UI/API create template-defined review tasks after planning; only a succeeded review source exposes the materialization action. The materialization task receives the reviewed plan/design `stdout.log` path plus the review evidence path and creates the task graph through HWE commands. HWE-generated task prompt wrappers are written in Chinese; user-provided requirements and constraints keep their original language.
 
 Example workflow template fragment:
 
 ```yaml
 id: software-project-dev
 parameters:
+  pm_profile: {default: '${designer_profile}'}
   designer_profile: {default: designer}
   reviewer_profile: {default: reviewer}
+  recovery_prompt_template: {default: pm/recovery-plan}
   task_breakdown_prompt_template: {default: designer/task-breakdown}
+profiles:
+  pm: ${pm_profile}
 planning_task:
   stage: workitem-plan
   profile: ${designer_profile}
@@ -314,6 +325,12 @@ materialize:
 child_workflows:
   - id: qa
     template: qa-review
+task_completion:
+  sources:
+    - statuses: [succeeded, failed, cancelled, skipped, superseded, waiting_for_info, waiting_for_approval]
+  post_execution:
+    profile: ${pm_profile}
+    prompt_template_ref: ${recovery_prompt_template}
 ```
 
 Example HTTP smoke task:
@@ -331,6 +348,12 @@ hwe task create my-project "$WORKFLOW_ID" "Smoke: backend and UI" \
 ```
 
 Each HTTP request supports `method`, `headers`, `json`, `body`, `expect_status`, `expect_json`, `expect_contains`, `retries`, `retry_delay_seconds`, and `timeout_seconds`. This is intended for final runtime checks such as backend health, API create/list/search, and frontend page compilation after separate command tasks have started the app or after the user has started project servers.
+
+When a task finishes in any configured completion status, HWE automatically queues a workflow-template-defined `post_execution` run request when the selected template provides `task_completion`. This is not a PM task record; it is the completed task's controller hook. The built-in templates default `pm_profile` to `designer`, so existing installs do not need a separate `pm` profile unless they want one. PM post-execution receives the source task id/status, run id, stdout/stderr paths, result JSON, project/workitem/workflow ids, project root, and HWE CLI/control context. It must decide whether to continue, wait, retry, create a replacement verification task, create a focused fix task, or send the work back through design. If PM succeeds after a successful/skipped/superseded source task and the workflow already has ready tasks but no queued workitem/task request, the worker enqueues a one-step workitem continuation. PM post-execution prompts also require workflow-template improvement suggestions when the outcome reveals a repeatable process gap.
+
+Pending human actions attached to a workitem or its current workflow block task claiming for that workitem until the action is resolved, even if tasks are otherwise `ready`.
+
+Treat failed `command` and `http_check` tasks as deterministic workflow gate failures. Inspect run logs and the task definition before retrying. If the verification command is wrong for the project layout, create a replacement verification task and mark the obsolete gate `superseded` only after replacement evidence succeeds. If the command is correct and exposes a product defect, create a focused fix task and rerun or replace the gate after the fix. Durable recovery paths belong in workflow templates rather than one-off operator prose.
 
 When a task is completed with `hwe task complete <project> <task-id>`, dependent tasks whose prerequisites succeeded become `ready` automatically. `skipped` and `superseded` are also terminal dependency-satisfying statuses for obsolete or duplicate work. Use them deliberately, with a result reason, when a replacement task has already delivered the intended output:
 

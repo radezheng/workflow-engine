@@ -15,6 +15,7 @@ import {
   ProjectRecord,
   PromptTemplate,
   RunLog,
+  RunRequest,
   RunSummary,
   RunTimeline,
   RunView,
@@ -36,6 +37,7 @@ import {
   getDashboard,
   getProjects,
   getPromptTemplates,
+  getRunRequest,
   getRunLog,
   getRunTimeline,
   getTaskPromptPreview,
@@ -85,6 +87,38 @@ function runSummaryMessage(summary: RunSummary, taskTitle?: string) {
   if (summary.waiting_for_human > 0) return `Run Next:${target} is waiting for human input.`;
   if (summary.tasks_succeeded > 0) return `Run Next:${target} succeeded.`;
   return `Run Next: started ${summary.tasks_started} task(s).`;
+}
+
+function runRequestMessage(request: RunRequest, taskTitle?: string) {
+  const target = taskTitle ? ` ${taskTitle}` : '';
+  if (request.status === 'queued') return `Run Next:${target} queued. Start or check the HWE worker if it does not move soon.`;
+  if (request.status === 'running') return `Run Next:${target} running on ${request.worker_id ?? 'worker'}.`;
+  if (request.status === 'failed') return `Run Next:${target} failed. Check Task Detail logs and Events.`;
+  if (request.status === 'cancelled') return `Run Next:${target} was cancelled.`;
+  if (request.status === 'waiting_for_human') return `Run Next:${target} is waiting for human input.`;
+  return `Run Next:${target} ${request.status}.`;
+}
+
+function requestResultSummary(request: RunRequest): RunSummary | null {
+  if (typeof request.result.tasks_started !== 'number') return null;
+  return request.result as unknown as RunSummary;
+}
+
+async function waitForRunRequest(projectRef: string, projectId: string, requestId: string, onTick: (request: RunRequest) => void): Promise<RunRequest> {
+  const queuedDeadline = Date.now() + 15_000;
+  let current = await getRunRequest(projectRef, projectId, requestId);
+  onTick(current);
+  while (current.status === 'queued' && Date.now() < queuedDeadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    current = await getRunRequest(projectRef, projectId, requestId);
+    onTick(current);
+  }
+  while (current.status === 'running') {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    current = await getRunRequest(projectRef, projectId, requestId);
+    onTick(current);
+  }
+  return current;
 }
 
 export function App() {
@@ -405,7 +439,12 @@ export function App() {
           .catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
       }, 2000);
       for (let runCount = 0; runCount < 100; runCount += 1) {
-        const summary = await runWorkitem(project.project_ref, project.id, workitem.id);
+        const queuedRequest = await runWorkitem(project.project_ref, project.id, workitem.id);
+        let latestRequest = queuedRequest;
+        setMessage(runRequestMessage(queuedRequest));
+        latestRequest = await waitForRunRequest(project.project_ref, project.id, queuedRequest.id, (request) => {
+          setMessage(runRequestMessage(request));
+        });
         const payload = await getDashboard(project.project_ref, project.id, workitem.id);
         const changedTask = payload.tasks.find((task) => (beforeTasks.get(task.id)?.attempt ?? task.attempt) < task.attempt)
           ?? payload.tasks.find((task) => beforeTasks.get(task.id)?.status !== task.status);
@@ -416,9 +455,10 @@ export function App() {
           setSelectedRun(null);
           setRunLog(null);
         }
-        setMessage(runSummaryMessage(summary, changedTask?.title));
+        const summary = requestResultSummary(latestRequest);
+        setMessage(summary ? runSummaryMessage(summary, changedTask?.title) : runRequestMessage(latestRequest, changedTask?.title));
         beforeTasks = new Map(payload.tasks.map((task) => [task.id, task]));
-        if (!autoRunRef.current || summary.tasks_started === 0 || summary.tasks_failed > 0 || summary.waiting_for_human > 0) break;
+        if (!summary || !autoRunRef.current || summary.tasks_started === 0 || summary.tasks_failed > 0 || summary.waiting_for_human > 0) break;
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -442,14 +482,20 @@ export function App() {
           .then((payload) => setDashboard(payload))
           .catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
       }, 2000);
-      const summary = await runTask(project.project_ref, project.id, task.id);
+      const queuedRequest = await runTask(project.project_ref, project.id, task.id);
+      let latestRequest = queuedRequest;
+      setMessage(runRequestMessage(queuedRequest, task.title));
+      latestRequest = await waitForRunRequest(project.project_ref, project.id, queuedRequest.id, (request) => {
+        setMessage(runRequestMessage(request, task.title));
+      });
       const payload = await getDashboard(project.project_ref, project.id, workitem.id);
       setDashboard(payload);
       await refreshWorkitems();
       setSelectedTaskId(task.id);
       setSelectedRun(null);
       setRunLog(null);
-      setMessage(runSummaryMessage(summary, task.title));
+      const summary = requestResultSummary(latestRequest);
+      setMessage(summary ? runSummaryMessage(summary, task.title) : runRequestMessage(latestRequest, task.title));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {

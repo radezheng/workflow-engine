@@ -23,6 +23,7 @@ type HumanActionListProps = {
 export function HumanActionList({ actions, disabled, assistContext = {}, onAnswer, onApprove, onReject }: HumanActionListProps) {
   const [drafts, setDrafts] = useState<Record<string, { text?: string; reason?: string }>>({});
   const [activeDialog, setActiveDialog] = useState<ActiveHumanActionDialog | null>(null);
+  const orderedActions = [...actions].sort(compareHumanActions);
 
   function selectOption(action: HumanAction, option: string) {
     const mode = action.kind === 'approval_request' ? 'approve' : 'answer';
@@ -35,8 +36,8 @@ export function HumanActionList({ actions, disabled, assistContext = {}, onAnswe
   }
   return (
     <div className="human-action-list">
-      {actions.map((action) => (
-        <article className="human-action" key={action.id}>
+      {orderedActions.map((action) => (
+        <article className={`human-action human-action-${action.status.replaceAll('_', '-')}`} key={action.id}>
           <div className="human-action-main">
             <div className="human-action-heading">
               <StatusPill status={action.status} />
@@ -205,6 +206,21 @@ function HumanActionResponseDialog({ action, mode, draft, disabled, assistContex
       </section>
     </div>
   );
+}
+
+function compareHumanActions(left: HumanAction, right: HumanAction): number {
+  const pendingDelta = actionPriority(left) - actionPriority(right);
+  if (pendingDelta !== 0) return pendingDelta;
+  return actionTime(right) - actionTime(left);
+}
+
+function actionPriority(action: HumanAction): number {
+  return action.status === 'pending' ? 0 : 1;
+}
+
+function actionTime(action: HumanAction): number {
+  const timestamp = action.status === 'pending' ? action.created_at : action.resolved_at ?? action.created_at;
+  return timestamp ? Date.parse(timestamp) || 0 : 0;
 }
 
 function responseTextForOption(action: HumanAction, option: string): string {

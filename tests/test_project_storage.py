@@ -11,6 +11,7 @@ from hermes_workflow_engine.cli import main
 from hermes_workflow_engine.config import HWEConfig
 from hermes_workflow_engine.project_runtime import ProjectRuntime
 from hermes_workflow_engine.project_storage import ProjectStorage, ProjectStorageError
+from hermes_workflow_engine.project_worker import ProjectWorker
 
 
 @pytest.fixture(autouse=True)
@@ -335,10 +336,23 @@ def test_standalone_pending_human_action_blocks_workitem_success(tmp_path: Path)
     )
 
     assert storage.get_workitem(workitem["id"])["status"] == "waiting_for_human"
+    next_task = storage.create_task(workflow["id"], "Use clarified scope", kind="command", profile="command", depends_on=[task["id"]])
+
+    assert storage.claim_next_task(workflow["id"], worker_id="worker-1", profile="command") is None
+    with pytest.raises(ProjectStorageError, match="waiting for human input"):
+        storage.claim_task(next_task["id"], worker_id="worker-1", profile="command")
+    run_request = storage.enqueue_run_request(project["id"], workitem["id"], kind="workitem", max_tasks=1)
+
+    worker_summary = ProjectWorker(worker_id="worker-1").run_once(project_ref=str(project_root), max_requests=1)
+
+    assert worker_summary.requests_waiting_for_human == 1
+    assert storage.get_run_request(run_request["id"])["status"] == "waiting_for_human"
+    assert storage.get_task(next_task["id"])["status"] == "ready"
 
     storage.resolve_human_action(action["id"], resolution="answered", response={"text": "Credit/GDP and policy rates"}, resolved_by="human")
 
-    assert storage.get_workitem(workitem["id"])["status"] == "succeeded"
+    assert storage.get_workitem(workitem["id"])["status"] == "in_progress"
+    assert storage.claim_next_task(workflow["id"], worker_id="worker-2", profile="command")["id"] == next_task["id"]
 
 
 def test_project_runtime_runs_command_task(tmp_path: Path) -> None:
@@ -491,6 +505,12 @@ def test_project_runtime_http_check_failure_blocks_summary(tmp_path: Path) -> No
     assert summary.tasks_failed == 1
     assert summary.failed == [task["id"]]
     assert summary.open == []
+    requests = storage.list_run_requests(project_id=project["id"], workitem_id=workitem["id"])
+    post_execution = next(request for request in requests if request.get("task_id") == task["id"])
+    assert post_execution["kind"] == "post_execution"
+    assert post_execution["profile"] == "designer"
+    assert post_execution["status"] == "queued"
+    assert post_execution["result"]["source_status"] == "failed"
 
 
 def test_task_release_cli_returns_running_task_to_ready(tmp_path: Path, capsys) -> None:
@@ -631,9 +651,18 @@ def test_run_workitem_cli_dry_run_agent_writes_prompt(tmp_path: Path, capsys) ->
         outputs=["docs/design.md"],
     )
 
-    assert main(["run-workitem", str(project_root), workitem["id"], "--project-id", project["id"], "--dry-run"]) == 0
-    summary = json.loads(capsys.readouterr().out)
+    assert main(["run-workitem", str(project_root), workitem["id"], "--project-id", project["id"], "--dry-run", "--local"]) == 0
+    request = json.loads(capsys.readouterr().out)
 
+    assert request["status"] == "queued"
+    assert request["kind"] == "workitem"
+
+    worker_summary = ProjectWorker(config=HWEConfig(), worker_id="test-worker").run_once(project_ref=str(project_root), max_requests=1)
+    completed_request = storage.get_run_request(request["id"])
+    summary = completed_request["result"]
+
+    assert worker_summary.requests_claimed == 1
+    assert completed_request["status"] == "succeeded"
     assert summary["tasks_started"] == 1
     assert summary["tasks_succeeded"] == 1
     assert storage.get_task(task["id"])["status"] == "succeeded"
@@ -978,3 +1007,142 @@ def test_project_runtime_failure_releases_claim_on_unhandled_exception(tmp_path:
         claim_row = connection.execute("SELECT status, release_reason FROM worker_claims WHERE task_id=?", (task["id"],)).fetchone()
     assert claim_row["status"] == "released"
     assert claim_row["release_reason"] == "failed"
+
+
+def test_project_runtime_queues_completion_post_execution_for_failed_task(tmp_path: Path) -> None:
+    project_root = tmp_path / "failed-task-pm-post-execution"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("failed-task-pm-post-execution")
+    workitem = storage.create_workitem(project["id"], "Recover failed verification")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    failed_task = storage.create_task(
+        workflow["id"],
+        "Build frontend",
+        kind="command",
+        profile="command",
+        prompt_text="exit 3",
+        priority=50,
+    )
+
+    summary = ProjectRuntime(storage, config=HWEConfig()).run_workitem(project["id"], workitem["id"], max_tasks=1)
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_failed == 1
+    assert storage.get_task(failed_task["id"])["status"] == "failed"
+    runs = storage.list_task_runs(task_id=failed_task["id"])
+    assert len(runs) == 1
+    tasks = storage.list_tasks(workflow["id"])
+    assert [task["id"] for task in tasks] == [failed_task["id"]]
+    requests = storage.list_run_requests(project_id=project["id"], workitem_id=workitem["id"])
+    post_execution = next(request for request in requests if request.get("task_id") == failed_task["id"])
+    assert post_execution["kind"] == "post_execution"
+    assert post_execution["profile"] == "designer"
+    assert post_execution["status"] == "queued"
+    assert post_execution["result"]["source_run_id"] == runs[0]["id"]
+    assert post_execution["result"]["source_status"] == "failed"
+    assert failed_task["id"] in post_execution["result"]["prompt_text"]
+    assert runs[0]["id"] in post_execution["result"]["prompt_text"]
+    assert runs[0]["stdout_path"] in post_execution["result"]["prompt_text"]
+    assert "HWE CLI" in post_execution["result"]["prompt_text"]
+    assert "hwe run-workitem" in post_execution["result"]["prompt_text"]
+    assert "workflow template" in post_execution["result"]["prompt_text"]
+
+
+def test_project_worker_runs_completion_post_execution_without_creating_task(tmp_path: Path) -> None:
+    project_root = tmp_path / "pm-post-execution-dry-run"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("pm-post-execution-dry-run")
+    workitem = storage.create_workitem(project["id"], "PM decides after success")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(
+        workflow["id"],
+        "Build succeeds",
+        kind="command",
+        profile="command",
+        prompt_text="true",
+    )
+
+    summary = ProjectRuntime(storage, dry_run=True, config=HWEConfig()).run_workitem(project["id"], workitem["id"], max_tasks=1)
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    requests = storage.list_run_requests(project_id=project["id"], workitem_id=workitem["id"])
+    post_execution = next(request for request in requests if request.get("task_id") == task["id"])
+
+    worker_summary = ProjectWorker(config=HWEConfig(), worker_id="pm-worker").run_once(project_ref=str(project_root), max_requests=1)
+
+    assert worker_summary.requests_claimed == 1
+    completed = storage.get_run_request(post_execution["id"])
+    assert completed["status"] == "succeeded"
+    assert completed["result"]["status"] == "succeeded"
+    assert completed["result"]["source_run_id"] == post_execution["result"]["source_run_id"]
+    assert Path(completed["result"]["prompt_path"]).exists()
+    tasks = storage.list_tasks(workflow["id"])
+    assert len(tasks) == 1
+
+
+def test_project_worker_runs_live_completion_post_execution_without_task_run_fk(tmp_path: Path) -> None:
+    project_root = tmp_path / "pm-post-execution-live"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("pm-post-execution-live")
+    workitem = storage.create_workitem(project["id"], "PM really runs after success")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    task = storage.create_task(
+        workflow["id"],
+        "Build succeeds",
+        kind="command",
+        profile="command",
+        prompt_text="true",
+    )
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path('pm-post-execution-ran.txt').write_text(' '.join(sys.argv[1:]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    config = HWEConfig(profiles={"designer": {"hermes_command": f"python3 {fake_hermes}", "timeout_seconds": 5}})
+
+    summary = ProjectRuntime(storage, config=config).run_workitem(project["id"], workitem["id"], max_tasks=1)
+    requests = storage.list_run_requests(project_id=project["id"], workitem_id=workitem["id"])
+    post_execution = next(request for request in requests if request.get("task_id") == task["id"])
+    worker_summary = ProjectWorker(config=config, worker_id="pm-worker").run_once(project_ref=str(project_root), max_requests=1)
+
+    assert summary.tasks_started == 1
+    assert summary.tasks_succeeded == 1
+    assert worker_summary.requests_claimed == 1
+    completed = storage.get_run_request(post_execution["id"])
+    assert completed["status"] == "succeeded"
+    assert completed["result"]["run_id"] == f"post_{post_execution['id']}"
+    assert (project_root / "pm-post-execution-ran.txt").exists()
+    events = [event for event in storage.list_events(project["id"]) if event["type"] == "task_process_started"]
+    post_event = next(event for event in events if event["payload"]["run_id"] == f"post_{post_execution['id']}")
+    assert post_event["run_id"] is None
+    assert len(storage.list_tasks(workflow["id"])) == 1
+
+
+def test_project_worker_continues_after_successful_post_execution(tmp_path: Path) -> None:
+    project_root = tmp_path / "pm-post-execution-continues"
+    storage = ProjectStorage(project_root)
+    project = storage.upsert_project("pm-post-execution-continues")
+    workitem = storage.create_workitem(project["id"], "PM continues to ready task")
+    workflow = storage.create_workflow(project["id"], workitem["id"], planner_profile="designer")
+    source = storage.create_task(workflow["id"], "Source succeeds", kind="command", profile="command", prompt_text="true", priority=10)
+    next_task = storage.create_task(workflow["id"], "Next ready", kind="command", profile="command", prompt_text="true", depends_on=[source["id"]], priority=20)
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text("print('pm approved continuation')\n", encoding="utf-8")
+    config = HWEConfig(profiles={"designer": {"hermes_command": f"python3 {fake_hermes}", "timeout_seconds": 5}})
+
+    workitem_request = storage.enqueue_run_request(project["id"], workitem["id"], kind="workitem", max_tasks=1)
+    first_summary = ProjectWorker(config=config, worker_id="worker-1").run_once(project_ref=str(project_root), max_requests=1)
+    post_request = next(request for request in storage.list_run_requests(project_id=project["id"], workitem_id=workitem["id"]) if request["kind"] == "post_execution")
+    second_summary = ProjectWorker(config=config, worker_id="worker-2").run_once(project_ref=str(project_root), max_requests=1)
+    continuation = next(request for request in storage.list_run_requests(project_id=project["id"], workitem_id=workitem["id"]) if request["kind"] == "workitem" and request["id"] != workitem_request["id"])
+
+    assert first_summary.requests_claimed == 1
+    assert storage.get_run_request(workitem_request["id"])["status"] == "succeeded"
+    assert storage.get_task(next_task["id"])["status"] == "ready"
+    assert second_summary.requests_claimed == 1
+    assert storage.get_run_request(post_request["id"])["status"] == "succeeded"
+    assert continuation["status"] == "queued"
+    assert continuation["kind"] == "workitem"

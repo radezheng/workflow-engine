@@ -10,6 +10,7 @@ Working rules:
 - Do not mutate external services, containers, credentials, ports, or volumes unless explicitly authorized.
 - Preserve user changes already present in the worktree.
 - Add or update tests when the change affects behavior.
+- Use non-interactive verification commands that do not require dangerous-command approval. Do not pipe network or downloaded content into interpreters or shells, such as `curl | python`, `curl | sh`, or `wget | bash`. For HTTP JSON checks, use a direct request tool when available, or save the response to a file and inspect it in a separate command.
 
 When finished, report:
 

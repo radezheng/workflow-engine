@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 from pathlib import Path
 import re
@@ -514,24 +513,49 @@ def delete_project_prompt_template(project_ref: str, role: str, name: str, proje
 def run_workitem(project_ref: str, workitem_id: str, request: RunWorkitemRequest) -> dict[str, Any]:
     storage = _storage(project_ref)
     project_id = _project_id(project_ref, request.project_id)
-    runtime = ProjectRuntime(storage, dry_run=request.dry_run)
-    summary = runtime.run_workitem(
+    return storage.enqueue_run_request(
         project_id,
         workitem_id,
-        worker_id=request.worker_id,
+        kind="workitem",
+        requested_worker_id=request.worker_id,
         profile=request.profile,
         max_tasks=request.max_tasks,
+        dry_run=request.dry_run,
     )
-    return asdict(summary)
 
 
 @app.post("/api/projects/{project_ref}/tasks/{task_id}/run")
 def run_task(project_ref: str, task_id: str, request: RunTaskRequest) -> dict[str, Any]:
     storage = _storage(project_ref)
     project_id = _project_id(project_ref, request.project_id)
-    runtime = ProjectRuntime(storage, dry_run=request.dry_run)
-    summary = runtime.run_one_task(project_id, task_id, worker_id=request.worker_id, profile=request.profile)
-    return asdict(summary)
+    task = storage.get_task(task_id)
+    if task["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Task does not belong to project.")
+    return storage.enqueue_run_request(
+        project_id,
+        task["workitem_id"],
+        kind="task",
+        task_id=task_id,
+        requested_worker_id=request.worker_id,
+        profile=request.profile,
+        max_tasks=1,
+        dry_run=request.dry_run,
+    )
+
+
+@app.get("/api/projects/{project_ref}/run-requests")
+def list_run_requests(project_ref: str, project_id: str | None = None, workitem_id: str | None = None, status: str | None = None, limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
+    storage = _storage(project_ref)
+    resolved_project_id = _project_id(project_ref, project_id)
+    return storage.list_run_requests(project_id=resolved_project_id, workitem_id=workitem_id, status=status, limit=limit)
+
+
+@app.get("/api/projects/{project_ref}/run-requests/{request_id}")
+def get_run_request(project_ref: str, request_id: str, project_id: str | None = None) -> dict[str, Any]:
+    request = _storage(project_ref).get_run_request(request_id)
+    if request["project_id"] != _project_id(project_ref, project_id):
+        raise HTTPException(status_code=404, detail="Run request does not belong to project.")
+    return request
 
 
 @app.post("/api/projects/{project_ref}/workitems/{workitem_id}/plan")
